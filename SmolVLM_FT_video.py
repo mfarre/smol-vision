@@ -25,7 +25,7 @@ import wandb
 
 # GPU config
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3, 4, 5, 6, 7"  # Use GPUs 0-3
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3, 4, 5, 6, 7"  # Use GPUs 0-3
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 # Configure logging
@@ -127,6 +127,13 @@ class VideoQADataset(Dataset):
 def is_main_process():
     return os.environ.get('LOCAL_RANK', '0') == '0'
 
+def is_main_process_multi_node():
+    # Check if this is the main process across all nodes
+    local_rank = int(os.environ.get('LOCAL_RANK', '0'))
+    global_rank = int(os.environ.get('RANK', '0'))
+    return local_rank == 0 and global_rank == 0
+
+
 def video_collate_fn(examples, processor):
     texts = []
     images_list = []
@@ -171,15 +178,57 @@ def video_collate_fn(examples, processor):
     # print(f"Num examples: {len(texts)}, Images per example: {[len(x) for x in images_list]}")
     
     batch = processor(text=texts, images=images_list, return_tensors="pt", padding=True)
+
+    # # Debug print for the first sequence in batch
+    # print("\nFirst sequence tokens:")
+    # input_ids = batch["input_ids"][0]
+    # tokens = processor.tokenizer.convert_ids_to_tokens(input_ids)
+    # print("\nToken ID -> Token mapping:")
+    # for idx, (token_id, token) in enumerate(zip(input_ids.tolist(), tokens)):
+    #     print(f"Position {idx}: ID {token_id} -> '{token}'")
+
+    # # Print what we're masking
+    # print("\nCurrently masking:")
+    # print(f"Pad token ID: {processor.tokenizer.pad_token_id}")
+    # print(f"Image token ID: {processor.tokenizer.additional_special_tokens_ids[processor.tokenizer.additional_special_tokens.index('<image>')]}")
     
+    # print("\nAll special token IDs:")
+    # special_tokens = {
+    #     'pad_token': processor.tokenizer.pad_token_id,
+    #     'eos_token': processor.tokenizer.eos_token_id,
+    #     'bos_token': processor.tokenizer.bos_token_id,
+    #     'unk_token': processor.tokenizer.unk_token_id,
+    #     'additional_special_tokens': processor.tokenizer.additional_special_tokens_ids
+    # }
+    # print(special_tokens)
+
+
+
     # Handle labels
     image_token_id = processor.tokenizer.additional_special_tokens_ids[
         processor.tokenizer.additional_special_tokens.index("<image>")]
+    fake_token_around_image_id = processor.tokenizer.additional_special_tokens_ids[
+        processor.tokenizer.additional_special_tokens.index("<fake_token_around_image>")]
+    end_of_utterance_id = processor.tokenizer.additional_special_tokens_ids[
+        processor.tokenizer.additional_special_tokens.index("<end_of_utterance>")]
+
     labels = batch["input_ids"].clone()
     labels[labels == processor.tokenizer.pad_token_id] = -100
-    labels[labels == image_token_id] = -100 
+    labels[labels == image_token_id] = -100
+    labels[labels == fake_token_around_image_id] = -100
+    labels[labels == end_of_utterance_id] = -100
+
     batch["labels"] = labels
     
+    # # Print what we're actually predicting
+    # print("\nPredicting these tokens (non -100):")
+    # non_masked = (labels[0] != -100).nonzero().squeeze()
+    # predict_tokens = processor.tokenizer.convert_ids_to_tokens(batch["input_ids"][0][non_masked])
+    # predict_ids = batch["input_ids"][0][non_masked].tolist()
+    # print("\nToken ID -> Token mapping for predictions:")
+    # for idx, (token_id, token) in enumerate(zip(predict_ids, predict_tokens)):
+    #     print(f"Position {idx}: ID {token_id} -> '{token}'")
+
     return batch
 
 def main():    
@@ -193,10 +242,10 @@ def main():
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Initialize wandb
-    if USE_WANDB and is_main_process():
+    if USE_WANDB and is_main_process_multi_node():
         wandb.init(
             project="smolvlm-video-qa",
-            name="smolvideolm-50frames",
+            name="smolvideolm-50frames-masking-tokens-v2",
             config={
                 "model_id": model_id,
                 "use_lora": USE_LORA,
@@ -266,15 +315,16 @@ def main():
     )
     
     # Training arguments
+    num_nodes = int(16)
     training_args = TrainingArguments(
         num_train_epochs=1,
         per_device_train_batch_size=1,  # Reduced due to multiple frames
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=16,  # Increased to compensate
-        warmup_steps=50,
-        learning_rate=1e-4,
+        gradient_accumulation_steps=16//num_nodes,  # Increased to compensate
+        warmup_steps=50 * num_nodes,
+        learning_rate=1e-4 * num_nodes,
         weight_decay=0.01,
-        logging_steps=25,
+        logging_steps=1,
         save_strategy="steps",
         save_steps=250,
         save_total_limit=1,
