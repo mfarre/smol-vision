@@ -13,6 +13,8 @@ from queue import Queue
 from threading import Event
 import torch
 from torch.utils.data import Dataset
+from torch.utils.data.distributed import DistributedSampler
+
 from transformers import (
     AutoProcessor, 
     BitsAndBytesConfig, 
@@ -231,7 +233,10 @@ def video_collate_fn(examples, processor):
 
     return batch
 
-def main():    
+def main():
+    # Initialize distributed environment
+    torch.distributed.init_process_group(backend='nccl')
+    
     # Configuration
     USE_LORA = False
     USE_QLORA = False
@@ -313,6 +318,9 @@ def main():
     train_dataset, eval_dataset = torch.utils.data.random_split(
         dataset, [train_size, len(dataset) - train_size]
     )
+
+    train_sampler = DistributedSampler(train_dataset)
+    eval_sampler = DistributedSampler(eval_dataset)
     
     # Training arguments
     num_nodes = int(16)
@@ -335,6 +343,7 @@ def main():
         report_to="wandb" if USE_WANDB else "none",
         logging_dir="./logs",
         logging_first_step=True,
+        dataloader_drop_last=True,
     )
 
     
