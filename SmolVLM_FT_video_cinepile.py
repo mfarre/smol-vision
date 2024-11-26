@@ -14,8 +14,6 @@ from threading import Event
 import torch
 from torch.utils.data import Dataset
 from torch.utils.data.distributed import DistributedSampler
-from tqdm.auto import tqdm
-from datasets import load_dataset
 
 from transformers import (
     AutoProcessor, 
@@ -27,183 +25,185 @@ from transformers import (
 from peft import LoraConfig, prepare_model_for_kbit_training, get_peft_model
 import wandb 
 
-# GPU config remains the same
+# GPU config
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3, 4, 5, 6, 7"  # Use GPUs 0-3
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-VID_DIR = "/fsx/miquel/hf-cinepile-collab2/hf-cinepile-collab/fix_cinepile/yt_videos/"
 
 class VideoFrameExtractor:
     def __init__(self, max_frames: int = 50):
         self.max_frames = max_frames
         
     def resize_and_center_crop(self, image: Image.Image, target_size: int) -> Image.Image:
+        """Resize the image preserving aspect ratio and then center crop."""
         width, height = image.size
+        
         if width < height:
             new_width = target_size
             new_height = int(height * (target_size / width))
         else:
             new_height = target_size
             new_width = int(width * (target_size / height))
+            
         image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
         left = (new_width - target_size) // 2
         top = (new_height - target_size) // 2
         right = left + target_size
         bottom = top + target_size
+        
         return image.crop((left, top, right, bottom))
         
-    def extract_frames(self, video_path: str, fps: float = 1.0) -> List[Image.Image]:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video: {video_path}")
-            
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        video_fps = int(cap.get(cv2.CAP_PROP_FPS))
-        
-        frame_step = int(video_fps / fps)
-        frame_indices = list(range(0, total_frames, frame_step))
-        
-        if len(frame_indices) > self.max_frames:
-            indices = np.linspace(0, len(frame_indices) - 1, self.max_frames, dtype=int)
-            frame_indices = [frame_indices[i] for i in indices]
-        
-        frames = []
-        for frame_idx in frame_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-            if ret:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                pil_image = Image.fromarray(frame)
-                pil_image = self.resize_and_center_crop(pil_image, 384)
-                frames.append(pil_image)
-        
-        cap.release()
-        return frames
-
-class CinepileDataset(Dataset):
-    def __init__(self, processor, max_frames=50, split="train", max_length=512):
-        self.dataset = load_dataset("tomg-group-umd/cinepile", split=split)
-        self.processor = processor
-        self.frame_extractor = VideoFrameExtractor(max_frames=max_frames)
-        self.max_length = max_length
-        
-        # Pre-filter valid indices during initialization
-        self.valid_indices = []
-        print("Filtering valid videos...")
-        for idx in tqdm(range(len(self.dataset))):
-            example = self.dataset[idx]
-            yt_link = example['yt_clip_link']
-            vid_file_name = f"{example['movie_name']}_{yt_link.split('/')[-1]}"
-            video_path = f"{VID_DIR}/{vid_file_name}.mp4"
-            
-            if os.path.exists(video_path):
-                self.valid_indices.append(idx)
-        
-        print(f"Found {len(self.valid_indices)} valid videos out of {len(self.dataset)} total")
-        if len(self.valid_indices) == 0:
-            raise RuntimeError("No valid videos found in dataset")
-
-    def __len__(self):
-        return len(self.valid_indices)
-
-    def __getitem__(self, idx):
+    def extract_frames(self, video_path: str) -> List[Image.Image]:
+        """Extract frames from video with error handling."""
         try:
-            # Get the actual dataset index from our filtered list
-            dataset_idx = self.valid_indices[idx]
-            example = self.dataset[dataset_idx]
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                logger.warning(f"Could not open video: {video_path}")
+                return []
+                
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = int(cap.get(cv2.CAP_PROP_FPS))
             
-            yt_link = example['yt_clip_link']
-            vid_file_name = f"{example['movie_name']}_{yt_link.split('/')[-1]}"
-            video_path = f"{VID_DIR}/{vid_file_name}.mp4"
+            if total_frames == 0 or fps == 0:
+                logger.error(f"Invalid video properties for {video_path}: frames={total_frames}, fps={fps}")
+                return []
             
-            # Extract frames
-            frames = self.frame_extractor.extract_frames(video_path)
+            # Calculate frame indices to extract (1fps)
+            frame_indices = list(range(0, total_frames, fps))
             
-            # Format question and choices
-            choice = {0: "A", 1: "B", 2: "C", 3: "D", 4: "E"}[example['answer_key_position']]
-            question = f"{example['question']}\n"
-            for i, opt in enumerate(example['choices']):
-                question += f"- {chr(65+i)}) {opt}\n"
-
-            # Create messages format
-            image_tokens = [{"type": "image"} for _ in range(len(frames))]
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Answer briefly with just the letter of your choice."},
-                        *image_tokens,
-                        {"type": "text", "text": f"Given these subtitles:\n{example['subtitles']}\n\n{question}"}
-                    ]
-                }
-            ]
-
-            # Process inputs
-            model_inputs = self.processor(
-                text=self.processor.apply_chat_template(messages, add_generation_prompt=True),
-                images=frames,
-                return_tensors="pt",
-                padding=True,
-                max_length=self.max_length,
-                truncation=True,
-            )
-
-            # Create labels by encoding the choice letter
-            labels = self.processor(
-                text=choice,
-                return_tensors="pt",
-                padding=True,
-                max_length=2,  # Just enough for the single letter answer
-                truncation=True,
-            ).input_ids
-
-            # Remove batch dimension
-            for k in model_inputs:
-                if isinstance(model_inputs[k], torch.Tensor):
-                    model_inputs[k] = model_inputs[k].squeeze(0)
-
-            model_inputs["labels"] = labels.squeeze(0)
+            # If we have more frames than max_frames, sample evenly
+            if len(frame_indices) > self.max_frames:
+                indices = np.linspace(0, len(frame_indices) - 1, self.max_frames, dtype=int)
+                frame_indices = [frame_indices[i] for i in indices]
             
-            return model_inputs
+            frames = []
+            for frame_idx in frame_indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ret, frame = cap.read()
+                if ret:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    pil_image = Image.fromarray(frame)
+                    pil_image = self.resize_and_center_crop(pil_image, 384)
+                    frames.append(pil_image)
+            
+            cap.release()
+            
+            if not frames:
+                logger.error(f"No frames extracted from {video_path}")
+                
+            return frames
             
         except Exception as e:
-            print(f"Error loading item at index {idx} (dataset index {dataset_idx}): {str(e)}")
-            # If we hit an error, try the next valid index
-            if idx + 1 < len(self.valid_indices):
-                return self.__getitem__(idx + 1)
-            else:
-                return self.__getitem__(0)  # Wrap around to start if at end
+            logger.error(f"Error processing video {video_path}: {str(e)}")
+            return []
 
-def is_main_process():
-    return os.environ.get('LOCAL_RANK', '0') == '0'
+class VideoQADataset(Dataset):
+    def __init__(self, data_path: str, processor, max_frames: int = 50):
+        self.processor = processor
+        self.frame_extractor = VideoFrameExtractor(max_frames)
+        
+        logger.info(f"Loading data from {data_path}")
+        with open(data_path, 'r') as f:
+            raw_data = json.load(f)
+            
+        # Process the raw data into the required format
+        self.data = []
+        for item in raw_data:
+            processed_item = self._process_conversation(item)
+            if processed_item:
+                self.data.append(processed_item)
+                
+        random.seed(42)
+        random.shuffle(self.data)
+        logger.info(f"Loaded {len(self.data)} examples")
 
-def is_main_process_multi_node():
-    # Check if this is the main process across all nodes
-    local_rank = int(os.environ.get('LOCAL_RANK', '0'))
-    global_rank = int(os.environ.get('RANK', '0'))
-    return local_rank == 0 and global_rank == 0
+    def _process_conversation(self, item):
+        """Process a single conversation item from the new format to the required format."""
+        try:
+            messages = item['messages']
+            
+            # Extract system message
+            system_message = next((msg for msg in messages if msg['role'] == 'system'), None)
+            
+            # Find the user message 
+            user_message = next((msg for msg in messages if msg['role'] == 'user'), None)
+            if not user_message:
+                return None
+                
+            # Get content from user message
+            user_content = user_message['content']
+            
+            # Extract video path from video content
+            video_info = next((content for content in user_content if content['type'] == 'video'), None)
+            if not video_info:
+                return None
+                
+            # Extract question from text content
+            text_info = next((content for content in user_content if content['type'] == 'text'), None)
+            if not text_info:
+                return None
+                
+            # Extract answer from assistant message
+            assistant_message = next((msg for msg in messages if msg['role'] == 'assistant'), None)
+            if not assistant_message or not assistant_message['content']:
+                return None
+                
+            return {
+                'video': video_info['video'],
+                'question': text_info['text'],
+                'answer': assistant_message['content'][0]['text']
+            }
+        except Exception as e:
+            logger.error(f"Error processing item: {str(e)}")
+            return None
+        
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        frames = self.frame_extractor.extract_frames(item['video'])
+        
+        # Skip examples with no frames
+        if not frames:
+            logger.warning(f"Skipping example {idx} due to no frames")
+            # Return the next valid example
+            return self.__getitem__((idx + 1) % len(self))
+            
+        return {
+            'frames': frames,
+            'question': item['question'],
+            'answer': item['answer']
+        }
+
 def video_collate_fn(examples, processor):
     texts = []
     images_list = []
     
     for example in examples:
         frames = example['frames']
-        subtitles = example['subtitles']
+        
+        # Skip if no frames (shouldn't happen due to __getitem__ handling)
+        if not frames:
+            continue
+            
         question = example['question']
         answer = example['answer']
         
+        # Create image tokens for each frame
         image_tokens = [{"type": "image"} for _ in range(len(frames))]
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Given these video frames and subtitles:\n" + subtitles},
+                    {"type": "text", "text": "Answer briefly."},
                     *image_tokens,
-                    {"type": "text", "text": "\n" + question}
+                    {"type": "text", "text": question}
                 ]
             },
             {
@@ -215,13 +215,20 @@ def video_collate_fn(examples, processor):
         ]
 
         text = processor.apply_chat_template(messages, add_generation_prompt=False)
+        # logger.info(messages)
         example_images = [img for img in frames]
+        
         texts.append(text.strip())
         images_list.append(example_images)
+        
+    # Make sure we have at least one example
+    if not texts or not images_list:
+        logger.error("No valid examples in batch")
+        raise ValueError("No valid examples in batch")
 
     batch = processor(text=texts, images=images_list, return_tensors="pt", padding=True)
 
-    labels = batch["input_ids"].clone()
+    # Handle labels
     image_token_id = processor.tokenizer.additional_special_tokens_ids[
         processor.tokenizer.additional_special_tokens.index("<image>")]
     fake_token_around_image_id = processor.tokenizer.additional_special_tokens_ids[
@@ -229,6 +236,7 @@ def video_collate_fn(examples, processor):
     end_of_utterance_id = processor.tokenizer.additional_special_tokens_ids[
         processor.tokenizer.additional_special_tokens.index("<end_of_utterance>")]
 
+    labels = batch["input_ids"].clone()
     labels[labels == processor.tokenizer.pad_token_id] = -100
     labels[labels == image_token_id] = -100
     labels[labels == fake_token_around_image_id] = -100
@@ -237,21 +245,34 @@ def video_collate_fn(examples, processor):
     batch["labels"] = labels
     return batch
 
-# Main function remains largely the same, with dataset changes
+def is_main_process():
+    return os.environ.get('LOCAL_RANK', '0') == '0'
+
+def is_main_process_multi_node():
+    # Check if this is the main process across all nodes
+    local_rank = int(os.environ.get('LOCAL_RANK', '0'))
+    global_rank = int(os.environ.get('RANK', '0'))
+    return local_rank == 0 and global_rank == 0
+
+
 def main():
+    # Initialize distributed environment
     torch.distributed.init_process_group(backend='nccl')
     
+    # Configuration
     USE_LORA = False
     USE_QLORA = False
     USE_WANDB = True
     model_id = "HuggingFaceTB/SmolVLM_converted_4"
+    data_path = "/fsx/miquel/simplevideo_trl/simplevideo_trl/lastExplorationCinePile/temp.json"
     max_frames = 50
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
+    # Initialize wandb
     if USE_WANDB and is_main_process_multi_node():
         wandb.init(
             project="smolvlm-video-qa",
-            name="smolvideolm-cinepile-50frames",
+            name="smolvideolm-50frames-cinepile",
             config={
                 "model_id": model_id,
                 "use_lora": USE_LORA,
@@ -261,7 +282,11 @@ def main():
             }
         )
 
+
+    # Initialize processor and model
     processor = AutoProcessor.from_pretrained(model_id)
+
+    # Special config for video
     processor.image_processor.size = (384, 384)
     processor.image_processor.do_resize = False
     processor.image_processor.do_image_splitting = False
@@ -304,43 +329,38 @@ def main():
             _attn_implementation="flash_attention_2",
         ).to(DEVICE)
     
+    # Enable gradient checkpointing to reduce memory usage
     model.gradient_checkpointing_enable()
 
-    # Initialize dataset with new CinepileDataset
-    dataset = CinepileDataset(processor, max_frames)
+    # Initialize dataset
+    dataset = VideoQADataset(data_path, processor, max_frames)
     
-    train_dataset = CinepileDataset(
-        processor=processor,
-        max_frames=50,
-        split="train"
+    # Split dataset
+    train_size = int(0.8 * len(dataset))
+    train_dataset, eval_dataset = torch.utils.data.random_split(
+        dataset, [train_size, len(dataset) - train_size]
     )
 
-    # For validation data
-    eval_dataset = CinepileDataset(
-        processor=processor,
-        max_frames=50,
-        split="test"
-    )
     train_sampler = DistributedSampler(train_dataset)
     eval_sampler = DistributedSampler(eval_dataset)
     
-    # Training arguments remain the same
+    # Training arguments
     num_nodes = int(16)
     training_args = TrainingArguments(
         num_train_epochs=1,
-        per_device_train_batch_size=1,
+        per_device_train_batch_size=1,  # Reduced due to multiple frames
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=16//num_nodes,
+        gradient_accumulation_steps=16//num_nodes,  # Increased to compensate
         warmup_steps=50 * num_nodes,
         learning_rate=1e-4 * num_nodes,
         weight_decay=0.01,
         logging_steps=1,
         save_strategy="steps",
-        save_steps=1000,
-        save_total_limit = 10,
+        save_steps=250,
+        save_total_limit=10,
         optim="adamw_torch" if not (USE_LORA or USE_QLORA) else "paged_adamw_8bit",
         bf16=True,
-        output_dir="./smolvlm-video-qa-cinepile",
+        output_dir="./smolvlm-video-qa",
         remove_unused_columns=False,
         report_to="wandb" if USE_WANDB else "none",
         logging_dir="./logs",
@@ -348,6 +368,8 @@ def main():
         dataloader_drop_last=True,
     )
 
+    
+    # Initialize trainer with custom collate function
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -356,9 +378,12 @@ def main():
         data_collator=lambda examples: video_collate_fn(examples, processor),
     )
     
+    # Train and evaluate
     trainer.train()
     trainer.evaluate()
-    dataset.executor.shutdown()    
+    
+    # Clean up
+    dataset.executor.shutdown()
     if USE_WANDB:
         wandb.finish()
 
