@@ -1,87 +1,126 @@
 import os
 import re
-import math
 import json
-import copy
 import argparse
 import warnings
-import traceback
-
+import logging
 import torch
-import pysubs2
 import numpy as np
-import pyarrow.parquet as pq
+import pysubs2
+from PIL import Image
+import cv2
 from tqdm import tqdm
+import pyarrow.parquet as pq
 from torch.utils.data import Dataset, DataLoader
+from transformers import AutoProcessor, Idefics3ForConditionalGeneration
 
-from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor, AutoConfig
-from qwen_vl_utils import process_vision_info
+warnings.filterwarnings('ignore')
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# NOTE: Ignore TypedStorage warning, which refers to this link~(https://github.com/pytorch/pytorch/issues/97207#issuecomment-1494781560)
-warnings.filterwarnings('ignore', category=UserWarning, message='TypedStorage is deprecated')
+BASE_MODEL_ID = "HuggingFaceTB/SmolVLM-Instruct"
 
-# Set the PyTorch memory management option
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-
-def split_list(lst, n):
-    """Split a list into n (roughly) equal-sized chunks"""
-    chunk_size = math.ceil(len(lst) / n)  # integer division
-    return [lst[i:i+chunk_size] for i in range(0, len(lst), chunk_size)]
-
-def get_chunk(lst, n, k):
-    chunks = split_list(lst, n)
-    return chunks[k]
+class VideoFrameExtractor:
+    def __init__(self, max_frames: int = 50):
+        self.max_frames = max_frames
+        
+    def resize_and_center_crop(self, image: Image.Image, target_size: int) -> Image.Image:
+        width, height = image.size
+        if width < height:
+            new_width = target_size
+            new_height = int(height * (target_size / width))
+        else:
+            new_height = target_size
+            new_width = int(width * (target_size / height))
+        
+        image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        left = (new_width - target_size) // 2
+        top = (new_height - target_size) // 2
+        right = left + target_size
+        bottom = top + target_size
+        
+        return image.crop((left, top, right, bottom))
+        
+    def extract_frames(self, video_path: str) -> list:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {video_path}")
+            
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        
+        frame_indices = list(range(0, total_frames, fps))
+        
+        if len(frame_indices) > self.max_frames:
+            indices = np.linspace(0, len(frame_indices) - 1, self.max_frames, dtype=int)
+            frame_indices = [frame_indices[i] for i in indices]
+        
+        frames = []
+        for frame_idx in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if ret:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(frame)
+                pil_image = self.resize_and_center_crop(pil_image, 384)
+                frames.append(pil_image)
+        
+        cap.release()
+        return frames
 
 class VideoMMEDataset(Dataset):
     video_formats = ['.mp4', '.avi', '.mov', '.mkv']
 
-    def __init__(self, video_folder, subtitle_folder, data_list, processor):
+    def __init__(self, video_folder, subtitle_folder, data_list, frame_extractor):
         self.video_folder = video_folder
         self.subtitle_folder = subtitle_folder
         self.data_list = data_list
-        self.processor = processor
+        self.frame_extractor = frame_extractor
 
     def __len__(self):
         return len(self.data_list)
     
     def __getitem__(self, idx):
-        line = self.data_list[idx]
-        video_ytid = line['url'].split('watch?v=')[-1]
+        record = self.data_list[idx]
+        video_ytid = record['youtube_id']
 
+        # Find video file
         video_path = None
         for fmt in self.video_formats:
-            temp_path = os.path.join(self.video_folder, f'{video_ytid}{fmt}')
+            temp_path = os.path.join(self.video_folder, f"{video_ytid}{fmt}")
             if os.path.exists(temp_path):
                 video_path = temp_path
                 break
+        if video_path is None:
+            raise FileNotFoundError(f"No video file found for {video_ytid}")
 
-        subtitle_path = os.path.join(self.subtitle_folder, f'{video_ytid}.srt')
-
+        # Extract frames
         try:
-            video_tensor = {"type": "video", "video": video_path, "fps": 1.0}
-        except:
-            traceback.print_exc()
-            print(f'It occurs error when reading {video_ytid}')
-            video_tensor = None
+            frames = self.frame_extractor.extract_frames(video_path)
+        except Exception as e:
+            logger.error(f"Error extracting frames for {video_ytid}: {str(e)}")
+            frames = None
 
-        if video_tensor is not None and os.path.exists(subtitle_path):
-            subs = pysubs2.load(subtitle_path, encoding="utf-8")
-            subtitles = [sub.text.replace("\\N", " ") for sub in subs]
-            subtitles = "\n".join(subtitles)
-        else:
+        # Load subtitles
+        subtitle_path = os.path.join(self.subtitle_folder, f'{video_ytid}.srt')
+        try:
+            if os.path.exists(subtitle_path):
+                subs = pysubs2.load(subtitle_path, encoding="utf-8")
+                subtitles = [sub.text.replace("\\N", " ") for sub in subs]
+                subtitles = "\n".join(subtitles)
+            else:
+                logger.warning(f"No subtitle file found for {video_ytid}")
+                subtitles = ""
+        except Exception as e:
+            logger.error(f"Error loading subtitles for {video_ytid}: {str(e)}")
             subtitles = ""
 
         return {
-            'video': video_tensor,
-            'subtitle': subtitles,
-            'record': line,
+            'record': record,
+            'frames': frames,
+            'subtitles': subtitles
         }
-
-def collate_fn(batch):
-    vid = [x['video'] for x in batch]
-    sub = [x['subtitle'] for x in batch]
-    rcs = [x['record'] for x in batch]
-    return vid, sub, rcs
 
 def load_parquet(parquet_file):
     table = pq.read_table(parquet_file)
@@ -118,214 +157,192 @@ def load_parquet(parquet_file):
 
     return jsons
 
-def build_videomme_eval(args, processor):
-    questions = load_parquet(args.question_file)
-    questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
-    dataset = VideoMMEDataset(args.video_folder, args.subtitle_folder, questions, processor)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn)
-    return dataloader
-
-def videomme_dump(record, instruct, output):
-    letters = ['A', 'B', 'C', 'D']
-    pred_answer = re.findall('[\(\ \[]*([A-D])[\)\.\ \]]*', output)
+def extract_answer_letter(response):
     try:
-        assert len(pred_answer) >= 1, 'The video \"{}\" output \"{}\" is not in the expected format'.format(record['youtube_id'], instruct + '\n' + output)
-        pred_answer = pred_answer[0].strip()
-        pred_answer = pred_answer.strip('()')
-        pred_idx = letters.index(pred_answer)
+        extracted_letter = response.split("Assistant: Answer: ")[1][0]
+        logger.info(f"\t Extracted letter {extracted_letter}")
+        return extracted_letter
     except:
-        traceback.print_exc()
-        pred_idx = 2
-    return letters[pred_idx]
+        logger.info('Returning None: No valid answer letter found in response')
+        return None
 
-def reduce_video_frames(video_input, max_frames=50):
-    """
-    Reduce the number of frames in a video tensor to a maximum of max_frames.
-    
-    Args:
-    video_input (torch.Tensor): Input video tensor of shape [num_frames, channels, height, width]
-    max_frames (int): Maximum number of frames in the output tensor
-    
-    Returns:
-    torch.Tensor: Video tensor with reduced number of frames
-    """
-    num_frames, channels, height, width = video_input.shape
-    
-    if num_frames <= max_frames:
-        return video_input
-    
-    # Calculate indices of frames to keep
-    keep_indices = torch.linspace(0, num_frames - 1, max_frames).long()
-    
-    # Select frames
-    reduced_video = video_input[keep_indices]
-    
-    return reduced_video
+def collate_fn(batch):
+    return {
+        'record': [item['record'] for item in batch],
+        'frames': [item['frames'] for item in batch],
+        'subtitles': [item['subtitles'] for item in batch]
+    }
+
 def run_inference(args):
-    # Modify the configuration parameters
-    max_length = 65536
+    # Load model and processor
+    if args.checkpoint_path:
+        logger.info(f"Loading model from checkpoint: {args.checkpoint_path}")
+        model_path = args.checkpoint_path
+    else:
+        logger.info(f"Loading vanilla model from {BASE_MODEL_ID}")
+        model_path = BASE_MODEL_ID
 
-    # 1. Load the original configuration
-    config = AutoConfig.from_pretrained(args.model_path)
-    
-    # 2. Modify the configuration
-    config.sliding_window = max_length
-    config.max_position_embeddings = max_length
-    config.model_max_length = max_length
-    
-    # 3. Initialize the model with the modified configuration
-    model = Qwen2VLForConditionalGeneration.from_pretrained(
-        args.model_path,
-        config=config,
-        torch_dtype="auto",
-        attn_implementation="flash_attention_2",
-        device_map="auto",
+    processor = AutoProcessor.from_pretrained(BASE_MODEL_ID)
+    processor.image_processor.size = (384, 384)
+    processor.image_processor.do_resize = False
+    processor.image_processor.do_image_splitting = False
+
+    model = Idefics3ForConditionalGeneration.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        device_map="auto"
     )
 
-    if args.adapter_path and args.adapter_path != "vanilla":
-        print(f"Loading adapter ckpt {args.adapter_path}")
-        model.load_adapter(args.adapter_path)
-    else:
-        print("Running vanilla model")
-    
-    # 4. Initialize and update the tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
-    tokenizer.model_max_length = max_length
-    
-    # 5. Initialize and update the processor
-    processor = AutoProcessor.from_pretrained(args.model_path)
-    processor.tokenizer = tokenizer  # Use the updated tokenizer
-    
-    # 6. Verify the configurations
-    print(f"Model config - Sliding window: {model.config.sliding_window}")
-    print(f"Model config - Max position embeddings: {model.config.max_position_embeddings}")
-    print(f"Model config - Model max length: {model.config.model_max_length}")
-    print(f"Tokenizer max length: {tokenizer.model_max_length}")
-    print(f"Processor image size: {processor.image_processor.size}")
-    print(f"Processor tokenizer max length: {processor.tokenizer.model_max_length}")
-
+    # Create output directory if needed
     answer_file = os.path.expanduser(args.answer_file)
     answer_sub_file = answer_file.replace('.json', '_sub.json')
     os.makedirs(os.path.dirname(answer_file), exist_ok=True)
     ans_file = open(answer_file, "w")
     ans_sub_file = open(answer_sub_file, "w")
 
-    val_loader = build_videomme_eval(args, processor)
+    # Load questions and create dataset
+    questions = load_parquet(args.question_file)
+    frame_extractor = VideoFrameExtractor(max_frames=args.max_frames)
+    dataset = VideoMMEDataset(args.video_folder, args.subtitle_folder, questions, frame_extractor)
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
-    for i, (videos, subtitles, records) in enumerate(tqdm(val_loader)):
-        # Clear CUDA cache at the start of each video iteration
-        torch.cuda.empty_cache()
+    logger.info(f"Starting inference on {len(dataset)} videos")
+    for batch in tqdm(dataloader):
+        record = batch['record'][0]
+        frames = batch['frames'][0]
+        subtitles = batch['subtitles'][0]
 
-        video = videos[0]
-        subtitle = subtitles[0]
-        record = records[0]
-
-        new_record = copy.deepcopy(record)
-        new_record_sub = copy.deepcopy(record)
-
-        if video is None:
-            new_record['missing'] = True
-            ans_file.write(json.dumps(new_record) + ",\n")
-            new_record_sub['missing'] = True
-            ans_sub_file.write(json.dumps(new_record_sub) + ",\n")
+        if frames is None:
+            logger.warning(f"Skipping {record['youtube_id']} due to frame extraction failure")
+            record['missing'] = True
+            ans_file.write(json.dumps(record) + "\n")
+            ans_sub_file.write(json.dumps(record) + "\n")
             continue
-        else:
-            new_record['missing'] = False
-            new_record_sub['missing'] = False
 
-        questions = record['questions']
-        for idx, question in enumerate(questions):
-            q = question['question']
-            ops = question['choices']
+        # Create copies for both normal and subtitle-enhanced responses
+        record_no_sub = record.copy()
+        record_with_sub = record.copy()
+        record_no_sub['missing'] = False
+        record_with_sub['missing'] = False
+        
+        for question in record['questions']:
+            try:
+                # Base instruction without subtitles
+                instruct = "Select the best answer to the following multiple-choice question based on the video. Respond with 'Answer: X' where X is the letter (A, B, C, or D) of the correct option.\n"
+                instruct += f"{question['question']}\n"
+                for idx, choice in enumerate(question['choices']):
+                    instruct += f"({chr(65+idx)}) {choice}\n"
 
-            instruct = "Select the best answer to the following multiple-choice question based on the video. Respond with only the letter (A, B, C, or D) of the correct option.\n"
-            instruct += f"{q}\n"
-            for op_idx, op in enumerate(ops):
-                instruct += f"{op}\n"
-            instruct += "The best answer is: "
+                # Process without subtitles
+                image_tokens = [{"type": "image"} for _ in range(len(frames))]
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Answer briefly."},
+                            *image_tokens,
+                            {"type": "text", "text": instruct}
+                        ]
+                    }
+                ]
 
-            # Prepare messages for Qwen2-VL
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        video,
-                        {"type": "text", "text": instruct},
-                    ],
-                }
-            ]
+                inputs = processor(
+                    text=processor.apply_chat_template(messages, add_generation_prompt=True),
+                    images=frames,
+                    return_tensors="pt"
+                ).to(model.device)
 
-            # Process input for Qwen2-VL
-            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            image_inputs, video_inputs = process_vision_info(messages)
-            reduced_video_inputs = [reduce_video_frames(vi, max_frames=32) for vi in video_inputs]
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=100,
+                    num_beams=5,
+                    temperature=0.7,
+                    do_sample=True,
+                    use_cache=True
+                )
 
-            for v in reduced_video_inputs:
-                print(f"Type: {type(v)}, Shape: {v.shape if hasattr(v, 'shape') else 'N/A'}")
+                response = processor.decode(outputs[0], skip_special_tokens=True)
+                logger.info(f"\nFull model response without subtitles for question {question['question_id']}: {response}")
+                
+                answer_letter = extract_answer_letter(response)
+                if answer_letter:
+                    question_no_sub = question.copy()
+                    question_no_sub['response'] = answer_letter
+                else:
+                    logger.warning(f"No valid answer found in response without subtitles for question {question['question_id']}")
+                    question_no_sub = question.copy()
+                    question_no_sub['response'] = 'A'
 
-            inputs = processor(
-                text=[text],
-                images=image_inputs,
-                videos=reduced_video_inputs,
-                padding=True,
-                return_tensors="pt",
-            )
-            inputs = inputs.to(model.device)
+                # Process with subtitles
+                instruct_with_sub = f"Video subtitles:\n{subtitles}\n\n" + instruct
+                messages_with_sub = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Answer briefly."},
+                            *image_tokens,
+                            {"type": "text", "text": instruct_with_sub}
+                        ]
+                    }
+                ]
 
-            # Generate output
-            generated_ids = model.generate(**inputs, max_new_tokens=128)
-            generated_ids_trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
-            output = processor.batch_decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+                inputs_with_sub = processor(
+                    text=processor.apply_chat_template(messages_with_sub, add_generation_prompt=True),
+                    images=frames,
+                    return_tensors="pt"
+                ).to(model.device)
 
-            new_record['questions'][idx]['response'] = videomme_dump(record, instruct, output)
+                outputs_with_sub = model.generate(
+                    **inputs_with_sub,
+                    max_new_tokens=100,
+                    num_beams=5,
+                    temperature=0.7,
+                    do_sample=True,
+                    use_cache=True
+                )
 
-            # Process with subtitle
-            instruct_with_sub = f"This video's subtitles are listed below:\n{subtitle}\n" + instruct
-            messages_with_sub = [
-                {
-                    "role": "user",
-                    "content": [
-                        video,
-                        {"type": "text", "text": instruct_with_sub},
-                    ],
-                }
-            ]
+                response_with_sub = processor.decode(outputs_with_sub[0], skip_special_tokens=True)
+                logger.info(f"\nFull model response with subtitles for question {question['question_id']}: {response_with_sub}")
+                
+                answer_letter_with_sub = extract_answer_letter(response_with_sub)
+                if answer_letter_with_sub:
+                    question_with_sub = question.copy()
+                    question_with_sub['response'] = answer_letter_with_sub
+                else:
+                    logger.warning(f"No valid answer found in response with subtitles for question {question['question_id']}")
+                    question_with_sub = question.copy()
+                    question_with_sub['response'] = 'A'
 
-            text_with_sub = processor.apply_chat_template(messages_with_sub, tokenize=False, add_generation_prompt=True)
-            inputs_with_sub = processor(
-                text=[text_with_sub],
-                images=image_inputs,
-                videos=reduced_video_inputs,
-                padding=True,
-                return_tensors="pt",
-            )
-            inputs_with_sub = inputs_with_sub.to(model.device)
+            except Exception as e:
+                logger.error(f"Error processing question {question['question_id']}: {str(e)}")
+                question_no_sub = question.copy()
+                question_with_sub = question.copy()
+                question_no_sub['response'] = 'A'
+                question_with_sub['response'] = 'A'
 
-            generated_ids_with_sub = model.generate(**inputs_with_sub, max_new_tokens=128)
-            generated_ids_trimmed_with_sub = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs_with_sub.input_ids, generated_ids_with_sub)]
-            output_with_sub = processor.batch_decode(generated_ids_trimmed_with_sub, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+            # Update the questions in respective records
+            for q in record_no_sub['questions']:
+                if q['question_id'] == question['question_id']:
+                    q.update(question_no_sub)
+            for q in record_with_sub['questions']:
+                if q['question_id'] == question['question_id']:
+                    q.update(question_with_sub)
 
-            new_record_sub['questions'][idx]['response'] = videomme_dump(record, instruct_with_sub, output_with_sub[0])
-
-        ans_file.write(json.dumps(new_record) + ",\n")
-        ans_sub_file.write(json.dumps(new_record_sub) + ",\n")
+        ans_file.write(json.dumps(record_no_sub) + "\n")
+        ans_sub_file.write(json.dumps(record_with_sub) + "\n")
 
     ans_file.close()
     ans_sub_file.close()
+    logger.info(f"Inference complete. Results written to {answer_file} and {answer_sub_file}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model-path', help='Path to the Qwen2-VL model', required=True)
-    parser.add_argument('--video-folder', help='Directory containing video files.', required=True)
-    parser.add_argument('--subtitle-folder', help='Directory containing subtitle files.', required=True)
-    parser.add_argument('--question-file', help='Path to the ground truth file containing question.', required=True)
-    parser.add_argument('--answer-file', help='Path to the ground truth file containing answers.', required=True)
-    parser.add_argument("--num-chunks", type=int, default=1)
-    parser.add_argument("--chunk-idx", type=int, default=0)
-    parser.add_argument("--device", type=str, required=False, default='cuda:0')
-    parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument('--adapter-path', help='Path to the finetuned adapter', type = str, default = None)
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description='Video QA Evaluation Script for SmolVLM')
+    parser.add_argument('--video-folder', help='Directory containing video files', required=True)
+    parser.add_argument('--subtitle-folder', help='Directory containing subtitle files', required=True)
+    parser.add_argument('--question-file', help='Path to the questions file', required=True)
+    parser.add_argument('--answer-file', help='Path to save the answers', required=True)
+    parser.add_argument('--max-frames', type=int, default=50, help='Maximum number of frames to extract per video')
+    parser.add_argument('--checkpoint-path', help='Path to a fine-tuned checkpoint (optional)', default=None)
 
+    args = parser.parse_args()
     run_inference(args)
