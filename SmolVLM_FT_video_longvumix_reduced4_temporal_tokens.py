@@ -336,11 +336,15 @@ def main():
     processor.image_processor.do_image_splitting = False
 
     # Adding frame special tokens
-    new_tokens = [f"<frame_{i}>" for i in range(MAX_SAMPLED_FRAMES)]
-    processor.tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
+    new_temporal_tokens = [f"<frame_{i}>" for i in range(MAX_SAMPLED_FRAMES)]
+    # Get existing special tokens
+    existing_tokens = processor.tokenizer.additional_special_tokens
 
-    # Resize token embeddings
-    model.resize_token_embeddings(len(processor.tokenizer))
+    # Combine existing and new tokens
+    all_special_tokens = existing_tokens + new_temporal_tokens
+
+    # Add all tokens together
+    processor.tokenizer.add_special_tokens({"additional_special_tokens": all_special_tokens})
 
     if USE_QLORA or USE_LORA:
         lora_config = LoraConfig(
@@ -379,7 +383,11 @@ def main():
             torch_dtype=torch.bfloat16,
             _attn_implementation="flash_attention_2",
         ).to(DEVICE)
-    
+
+    # Resize token embeddings to account for new tokens
+    model.resize_token_embeddings(len(processor.tokenizer))
+
+
     # Enable gradient checkpointing to reduce memory usage
     model.gradient_checkpointing_enable()
 
