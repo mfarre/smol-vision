@@ -306,10 +306,9 @@ def main():
     # Configuration
     USE_LORA = False
     USE_QLORA = False
-    USE_WANDB = False
+    USE_WANDB = True
     model_id = "HuggingFaceTB/SmolVLM_converted_4"
     # data_path = "/fsx/miquel/LongVU/trainings/prep_material/train_video_data_simplevideo.json"
-    max_frames = 50
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Initialize wandb
@@ -321,7 +320,7 @@ def main():
                 "model_id": model_id,
                 "use_lora": USE_LORA,
                 "use_qlora": USE_QLORA,
-                "max_frames": max_frames,
+                "max_frames": MAX_SAMPLED_FRAMES,
                 "device": DEVICE,
             }
         )
@@ -392,10 +391,10 @@ def main():
     model.gradient_checkpointing_enable()
 
     # Initialize dataset
-    dataset = VideoQADataset(processor, max_frames)
+    dataset = VideoQADataset(processor, MAX_SAMPLED_FRAMES)
     
     # Split dataset
-    train_dataset = VideoQADataset(processor, max_frames, split="train")
+    train_dataset = VideoQADataset(processor, MAX_SAMPLED_FRAMES, split="train")
     train_sampler = DistributedSampler(train_dataset)
     
     # Training arguments
