@@ -132,11 +132,14 @@ def generate_response(model, processor, video_path: str, question: str, max_fram
 
 def main():
     # Configuration
-    #checkpoint_path = "/path/to/your/checkpoint"
-    checkpoint_path = None
-    base_model_id = "HuggingFaceTB/SmolVLM-Instruct"  
-    video_path = "/path/to/video.mp4"
-    question = "Describe the video"
+    checkpoint_path = "/fsx/miquel/smol-vision/smolvlm-longvumix-filter1-lowlrhighwarm_3/checkpoint-4000"
+    #checkpoint_path = None
+    #checkpoint_path = "/fsx/miquel/smol-vision/smolvlm-longvumix-filter1/checkpoint-4000"
+    # base_model_id = "HuggingFaceTB/SmolVLM-Instruct"  
+    base_model_id = "HuggingFaceTB/SmolVLM_converted_4"
+    #video_path = "/fsx/miquel/fineVideo2Idefics/a/videos/--Dq6kFSRDE_scene_1.mp4"
+    video_path = "/fsx/miquel/cinepile/fulldatasetvideoscenes/00053/0005375.mp4"
+    question = "can you explain step by step what is happening in this video?"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     

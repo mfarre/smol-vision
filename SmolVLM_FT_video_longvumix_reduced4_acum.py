@@ -302,7 +302,7 @@ def main():
     if USE_WANDB and is_main_process_multi_node():
         wandb.init(
             project="smolvlm-longvumix",
-            name="v1-filter-lowlrhighwarmup",
+            name="v1-filter-lowlrhighwarmup_4_acum",
             config={
                 "model_id": model_id,
                 "use_lora": USE_LORA,
@@ -372,20 +372,20 @@ def main():
     # Training arguments
     num_nodes = int(16)
     training_args = TrainingArguments(
-        num_train_epochs=1,
+        num_train_epochs=2,
         per_device_train_batch_size=1,  # Reduced due to multiple frames
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=16//num_nodes,  # Increased to compensate
+        gradient_accumulation_steps=32//num_nodes,  # Increased from 16 to 32
         warmup_steps=200 * num_nodes, # increased from 30 to 200
-        learning_rate=1e-5 * num_nodes, # reduced from 1e-4
+        learning_rate=5e-7 * num_nodes, # reduced from 1e-4
         weight_decay=0.01,
         logging_steps=20,
         save_strategy="steps",
-        save_steps=1000,
+        save_steps=250,
         save_total_limit=30,
         optim="adamw_torch" if not (USE_LORA or USE_QLORA) else "paged_adamw_8bit",
         bf16=True,
-        output_dir="./smolvlm-longvumix-filter1-lowlrhighwarm",
+        output_dir="./smolvlm-longvumix-filter1-lowlrhighwarm_4_acum",
         remove_unused_columns=False,
         report_to="wandb" if USE_WANDB else "none",
         logging_dir="./logs",

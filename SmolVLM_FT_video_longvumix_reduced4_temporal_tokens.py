@@ -31,12 +31,14 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3, 4, 5, 6, 7"  # Use GPUs 0-3
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
+MAX_SAMPLED_FRAMES = 50
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class VideoFrameExtractor:
-    def __init__(self, max_frames: int = 50):
+    def __init__(self, max_frames: int = MAX_SAMPLED_FRAMES):
         self.max_frames = max_frames
         
     def resize_and_center_crop(self, image: Image.Image, target_size: int) -> Image.Image:
@@ -197,8 +199,14 @@ def video_collate_fn(examples, processor):
         question = example['question']
         answer = example['answer']
         
-        # Create exactly as many image tokens as we have frames
-        image_tokens = [{"type": "image"} for _ in range(len(frames))]
+        # Add temporal tokens between frames
+        image_tokens = []
+        for i in range(len(frames)):
+            image_tokens.append({"type": "image"})
+            if i < len(frames) - 1:
+                # Add temporal token between frames
+                image_tokens.append({"type": "text", "text": f"<frame_{i}>"})
+        
         messages = [
             {
                 "role": "user",
@@ -272,6 +280,12 @@ def video_collate_fn(examples, processor):
     labels[labels == fake_token_around_image_id] = -100
     labels[labels == end_of_utterance_id] = -100
 
+    # Mask out temporal tokens in labels
+    temporal_token_ids = [processor.tokenizer.convert_tokens_to_ids(f"<frame_{i}>") 
+                        for i in range(MAX_SAMPLED_FRAMES)]
+    for token_id in temporal_token_ids:
+        labels[labels == token_id] = -100
+
     batch["labels"] = labels
     
     # # Print what we're actually predicting
@@ -292,7 +306,7 @@ def main():
     # Configuration
     USE_LORA = False
     USE_QLORA = False
-    USE_WANDB = True
+    USE_WANDB = False
     model_id = "HuggingFaceTB/SmolVLM_converted_4"
     # data_path = "/fsx/miquel/LongVU/trainings/prep_material/train_video_data_simplevideo.json"
     max_frames = 50
@@ -302,7 +316,7 @@ def main():
     if USE_WANDB and is_main_process_multi_node():
         wandb.init(
             project="smolvlm-longvumix",
-            name="v1-filter-lowlrhighwarmup",
+            name="v1-filter-lowlrhighwarmup_4_temporal",
             config={
                 "model_id": model_id,
                 "use_lora": USE_LORA,
@@ -320,6 +334,13 @@ def main():
     processor.image_processor.size = (384, 384)
     processor.image_processor.do_resize = False
     processor.image_processor.do_image_splitting = False
+
+    # Adding frame special tokens
+    new_tokens = [f"<frame_{i}>" for i in range(MAX_SAMPLED_FRAMES)]
+    processor.tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
+
+    # Resize token embeddings
+    model.resize_token_embeddings(len(processor.tokenizer))
 
     if USE_QLORA or USE_LORA:
         lora_config = LoraConfig(
@@ -377,15 +398,15 @@ def main():
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=16//num_nodes,  # Increased to compensate
         warmup_steps=200 * num_nodes, # increased from 30 to 200
-        learning_rate=1e-5 * num_nodes, # reduced from 1e-4
+        learning_rate=5e-7 * num_nodes, # reduced from 1e-4
         weight_decay=0.01,
         logging_steps=20,
         save_strategy="steps",
-        save_steps=1000,
+        save_steps=250,
         save_total_limit=30,
         optim="adamw_torch" if not (USE_LORA or USE_QLORA) else "paged_adamw_8bit",
         bf16=True,
-        output_dir="./smolvlm-longvumix-filter1-lowlrhighwarm",
+        output_dir="./smolvlm-longvumix-filter1-lowlrhighwarm_4_temporal",
         remove_unused_columns=False,
         report_to="wandb" if USE_WANDB else "none",
         logging_dir="./logs",
