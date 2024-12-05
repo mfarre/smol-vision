@@ -183,7 +183,15 @@ class VideoFrameExtractor:
             frames.append(image)
             
         return frames
-
+    
+    def extract_frames(self, path: str) -> List[Image.Image]:
+        """Extract frames from video file, GIF, or folder of images"""
+        if os.path.isdir(path):
+            return self.extract_frames_from_folder(path)
+        elif path.lower().endswith('.gif'):
+            return self.extract_frames_from_gif(path)
+        else:
+            return self.extract_frames_from_video(path)
 class VideoMMEDataset(Dataset):
     video_formats = ['.mp4', '.avi', '.mov', '.mkv']
 
