@@ -129,7 +129,7 @@ class VideoFrameExtractor:
             
         except Exception as e:
             print(f"Error processing video {video_path}: {str(e)}")
-            raise
+            return []
 
     def extract_frames_from_gif(self, gif_path: str) -> List[Image.Image]:
         """Extract frames from GIF file"""
