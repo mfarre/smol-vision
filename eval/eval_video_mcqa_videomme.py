@@ -112,7 +112,13 @@ def eval_your_results(
 
     # Load your results
     with open(your_results_path, 'r') as f:
-        your_results = json.load(f)
+        a = f.read().split("\n")
+        a = a[1:-1]
+        your_results = []
+        for elem in a:
+            #print(".")
+            #print(elem)
+            your_results.append(json.loads(elem))
 
     if isinstance(video_types, str):
         video_types = video_types.split(",")

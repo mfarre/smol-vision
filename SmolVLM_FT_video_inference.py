@@ -5,6 +5,10 @@ import cv2
 import numpy as np
 from typing import List
 import logging
+from transformers import AutoTokenizer
+import os
+
+OWN_TOKENS=False
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -90,14 +94,20 @@ def load_model(checkpoint_path: str, base_model_id: str = "HuggingFaceTB/SmolVLM
     
     return model, processor
 
-def generate_response(model, processor, video_path: str, question: str, max_frames: int = 50):
+def generate_response(model, processor, video_path: str, question: str, max_frames: int = 50, temp_tokens: bool= False):
     # Extract frames
     frame_extractor = VideoFrameExtractor(max_frames)
     frames = frame_extractor.extract_frames(video_path)
     logger.info(f"Extracted {len(frames)} frames from video")
     
     # Create prompt with frames
-    image_tokens = [{"type": "image"} for _ in range(len(frames))]
+    image_tokens = []
+    for i in range(len(frames)):
+        image_tokens.append({"type": "image"})
+        if temp_tokens:
+            if i < len(frames) -1:
+                image_tokens.append({"type": "text", "text": f"<frame_{i}>"})
+
     messages = [
         {
             "role": "user",
@@ -131,14 +141,15 @@ def generate_response(model, processor, video_path: str, question: str, max_fram
     return response
 
 def main():
+    temp_tokens = False
     # Configuration
-    checkpoint_path = "/fsx/miquel/smol-vision/smolvlm-longvumix-filter1-lowlrhighwarm_3/checkpoint-4000"
+    checkpoint_path = "/fsx/miquel/smol-vision/smolvlm-longvumix-high_lr_videofix_100frames_base/checkpoint-2000"
     #checkpoint_path = None
-    #checkpoint_path = "/fsx/miquel/smol-vision/smolvlm-longvumix-filter1/checkpoint-4000"
+    # checkpoint_path = "/fsx/miquel/smol-vision/smolvlm-longvumix-filter1-lowlrhighwarm_4_v2/checkpoint-4000"
     # base_model_id = "HuggingFaceTB/SmolVLM-Instruct"  
     base_model_id = "HuggingFaceTB/SmolVLM_converted_4"
-    #video_path = "/fsx/miquel/fineVideo2Idefics/a/videos/--Dq6kFSRDE_scene_1.mp4"
-    video_path = "/fsx/miquel/cinepile/fulldatasetvideoscenes/00053/0005375.mp4"
+    video_path = "/fsx/miquel/fineVideo2Idefics/a/videos/--Dq6kFSRDE_scene_1.mp4"
+    # video_path = "/fsx/miquel/cinepile/fulldatasetvideoscenes/00053/0005375.mp4"
     question = "can you explain step by step what is happening in this video?"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -146,10 +157,19 @@ def main():
     # Load model
     logger.info("Loading model...")
     model, processor = load_model(checkpoint_path, base_model_id, device)
-    
+
+    if 'tokenizer.json' in os.listdir(os.path.dirname(checkpoint_path)):
+        print("LOADING CUSTOM TOKENIZER")
+        processor.tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
+        temp_tokens = True
+
+    # print(processor.tokenizer.special_tokens_map)
+    # print(processor.tokenizer.additional_special_tokens)
+    # print(processor.tokenizer.pretrained_vocab_files_map)
+
     # Generate response
     logger.info("Generating response...")
-    response = generate_response(model, processor, video_path, question)
+    response = generate_response(model, processor, video_path, question, max_frames=100, temp_tokens=temp_tokens)
     
     # Print results
     print("Question:", question)

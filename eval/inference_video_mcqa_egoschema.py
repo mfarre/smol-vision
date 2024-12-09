@@ -263,12 +263,17 @@ def run_inference(args):
     processor.image_processor.do_resize = False
     processor.image_processor.do_image_splitting = False
 
+    temp_tokens = False
+
     if args.checkpoint_path:
-        processor.tokenizer = AutoTokenizer.from_pretrained(args.checkpoint_path)
-        print("VALIDATING OWN TOKEN ADDITIONS")
-        print(processor.tokenizer.special_tokens_map)
-        print(processor.tokenizer.additional_special_tokens)
-        print(processor.tokenizer.pretrained_vocab_files_map)
+            if 'tokenizer.json' in os.listdir(os.path.dirname(args.checkpoint_path)):
+                print("LOADING CUSTOM TOKENIZER")
+                processor.tokenizer = AutoTokenizer.from_pretrained(args.checkpoint_path)
+                temp_tokens = True
+                print("VALIDATING OWN TOKEN ADDITIONS")
+                print(processor.tokenizer.special_tokens_map)
+                print(processor.tokenizer.additional_special_tokens)
+                print(processor.tokenizer.pretrained_vocab_files_map)
 
 
     model = Idefics3ForConditionalGeneration.from_pretrained(
@@ -301,7 +306,7 @@ def run_inference(args):
             image_tokens = []
             for i in range(len(frames)):
                 image_tokens.append({"type": "image"})
-                if i < len(frames) -1:
+                if i < len(frames) -1 and temp_tokens:
                     image_tokens.append({"type": "text", "text": f"<frame_{i}>"})
 
             messages = [
