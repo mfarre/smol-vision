@@ -8,10 +8,135 @@ import logging
 from transformers import AutoTokenizer
 import os
 
-OWN_TOKENS=False
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# Alternative video reader
+# import decord
+# from decord import VideoReader
+# class VideoFrameExtractor:
+#     def __init__(self, max_frames: int = 50):
+#         self.max_frames = max_frames
+        
+#     def resize_and_center_crop(self, image: Image.Image, target_size: int) -> Image.Image:
+#         """Resize the image preserving aspect ratio and then center crop."""
+#         width, height = image.size
+        
+#         if width < height:
+#             new_width = target_size
+#             new_height = int(height * (target_size / width))
+#         else:
+#             new_height = target_size
+#             new_width = int(width * (target_size / height))
+            
+#         image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+#         left = (new_width - target_size) // 2
+#         top = (new_height - target_size) // 2
+#         right = left + target_size
+#         bottom = top + target_size
+        
+#         return image.crop((left, top, right, bottom))
+
+#     def extract_frames_from_video(self, video_path: str) -> List[Image.Image]:
+#         """Extract frames from video file using decord"""
+#         decord.bridge.set_bridge('torch')  # Using torch bridge for better GPU support
+        
+#         try:
+#             # Load video with decord
+#             vr = VideoReader(video_path)
+#             total_frames = len(vr)
+            
+#             # Calculate frame indices for sampling
+#             if total_frames <= self.max_frames:
+#                 frame_indices = list(range(total_frames))
+#             else:
+#                 # Sample frames evenly
+#                 frame_indices = np.linspace(0, total_frames - 1, self.max_frames, dtype=int).tolist()
+            
+#             # Read frames
+#             frames = vr.get_batch(frame_indices)
+            
+#             # Convert to PIL and process
+#             processed_frames = []
+#             for frame in frames:
+#                 # Convert from torch tensor to PIL
+#                 frame = frame.numpy()
+#                 pil_image = Image.fromarray(frame)
+#                 pil_image = self.resize_and_center_crop(pil_image, 384)
+#                 processed_frames.append(pil_image)
+                
+#             return processed_frames
+            
+#         except Exception as e:
+#             print(f"Error processing video {video_path}: {str(e)}")
+#             raise
+
+#     def extract_frames_from_gif(self, gif_path: str) -> List[Image.Image]:
+#         """Extract frames from GIF file"""
+#         gif = Image.open(gif_path)
+#         frames = []
+#         try:
+#             while True:
+#                 frames.append(gif.copy())
+#                 gif.seek(gif.tell() + 1)
+#         except EOFError:
+#             pass
+
+#         if len(frames) > self.max_frames:
+#             indices = np.linspace(0, len(frames) - 1, self.max_frames, dtype=int)
+#             frames = [frames[i] for i in indices]
+
+#         return [self.resize_and_center_crop(frame.convert('RGB'), 384) for frame in frames]
+
+#     def extract_frames_from_folder(self, folder_path: str) -> List[Image.Image]:
+#         """Extract frames from folder containing numbered image files"""
+#         image_extensions = ('.jpg', '.jpeg', '.png')
+#         files = [f for f in os.listdir(folder_path) if f.lower().endswith(image_extensions)]
+        
+#         # Extract base filename and number using regex
+#         import re
+#         pattern = re.compile(r'(.+?)[-_]?(\d+)\..*$')
+#         numbered_files = []
+        
+#         for file in files:
+#             match = pattern.match(file)
+#             if match:
+#                 base, num = match.groups()
+#                 numbered_files.append((file, base, int(num)))
+        
+#         if not numbered_files:
+#             raise ValueError(f"No valid numbered image files found in {folder_path}")
+            
+#         # Sort by base filename and number
+#         numbered_files.sort(key=lambda x: (x[1], x[2]))
+#         sorted_files = [f[0] for f in numbered_files]
+#         # Sample frames evenly if needed
+#         if len(sorted_files) > self.max_frames:
+#             indices = np.linspace(0, len(sorted_files) - 1, self.max_frames, dtype=int)
+#             sorted_files = [sorted_files[i] for i in indices]
+        
+#         frames = []
+#         for file in sorted_files:
+#             image_path = os.path.join(folder_path, file)
+#             image = Image.open(image_path)
+#             image = self.resize_and_center_crop(image.convert('RGB'), 384)
+#             frames.append(image)
+            
+#         return frames
+
+#     def extract_frames(self, path: str) -> List[Image.Image]:
+#         """Extract frames from video file, GIF, or folder of images"""
+#         if os.path.isdir(path):
+#             return self.extract_frames_from_folder(path)
+#         elif path.lower().endswith('.gif'):
+#             return self.extract_frames_from_gif(path)
+#         else:
+#             return self.extract_frames_from_video(path)
+
+
+
 
 class VideoFrameExtractor:
     def __init__(self, max_frames: int = 50):
@@ -143,11 +268,11 @@ def generate_response(model, processor, video_path: str, question: str, max_fram
 def main():
     temp_tokens = False
     # Configuration
-    checkpoint_path = "/fsx/miquel/smol-vision/smolvlm-longvumix-high_lr_videofix_100frames_base/checkpoint-2000"
-    #checkpoint_path = None
+    #checkpoint_path = "/fsx/miquel/smol-vision/smolvlm_frames8_with_temp_lr_1e-5/checkpoint-624"
     # checkpoint_path = "/fsx/miquel/smol-vision/smolvlm-longvumix-filter1-lowlrhighwarm_4_v2/checkpoint-4000"
-    # base_model_id = "HuggingFaceTB/SmolVLM-Instruct"  
-    base_model_id = "HuggingFaceTB/SmolVLM_converted_4"
+    checkpoint_path = None
+    base_model_id = "HuggingFaceTB/SmolVLM-Instruct"  
+    # base_model_id = "HuggingFaceTB/SmolVLM_converted_4"
     video_path = "/fsx/miquel/fineVideo2Idefics/a/videos/--Dq6kFSRDE_scene_1.mp4"
     # video_path = "/fsx/miquel/cinepile/fulldatasetvideoscenes/00053/0005375.mp4"
     question = "can you explain step by step what is happening in this video?"
@@ -158,14 +283,11 @@ def main():
     logger.info("Loading model...")
     model, processor = load_model(checkpoint_path, base_model_id, device)
 
-    if 'tokenizer.json' in os.listdir(os.path.dirname(checkpoint_path)):
-        print("LOADING CUSTOM TOKENIZER")
-        processor.tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
-        temp_tokens = True
-
-    # print(processor.tokenizer.special_tokens_map)
-    # print(processor.tokenizer.additional_special_tokens)
-    # print(processor.tokenizer.pretrained_vocab_files_map)
+    if checkpoint_path is not None:
+        if 'tokenizer.json' in os.listdir(os.path.dirname(checkpoint_path)):
+            print("LOADING CUSTOM TOKENIZER")
+            processor.tokenizer = AutoTokenizer.from_pretrained(os.path.dirname(checkpoint_path))
+            temp_tokens = True
 
     # Generate response
     logger.info("Generating response...")
