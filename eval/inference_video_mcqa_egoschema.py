@@ -261,6 +261,7 @@ def run_inference(args):
     # Load model and processor
     if args.checkpoint_path:
         logger.info(f"Loading model from checkpoint: {args.checkpoint_path}")
+        print(f"Loading model from checkpoint: {args.checkpoint_path}")
         model_path = args.checkpoint_path
     else:
         logger.info(f"Loading vanilla model from {BASE_MODEL_ID}")
