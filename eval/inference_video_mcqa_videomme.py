@@ -314,7 +314,7 @@ def run_inference(args):
     if args.checkpoint_path:
             if 'tokenizer.json' in os.listdir(os.path.dirname(args.checkpoint_path)):
                 print("LOADING CUSTOM TOKENIZER")
-                processor.tokenizer = AutoTokenizer.from_pretrained(args.checkpoint_path)
+                processor.tokenizer = AutoTokenizer.from_pretrained(os.path.dirname(args.checkpoint_path))
                 temp_tokens = True
                 print("VALIDATING OWN TOKEN ADDITIONS")
                 print(processor.tokenizer.special_tokens_map)
