@@ -249,6 +249,14 @@ def collate_fn(batch):
         'instruct': [item['instruct'] for item in batch],
     }
 
+def check_custom_temp_tokens(checkpoint_path):
+    if 'tokenizer.json' in os.listdir(os.path.dirname(args.checkpoint_path)):
+        a = json.loads(open(os.path.dirname(args.checkpoint_path) + 'tokenizer.json',"r").read())
+        for t in a['added_tokens']:
+            if t['content'] == "<frame_0>":
+                return True
+    return False
+
 def run_inference(args):
     # Load model and processor
     if args.checkpoint_path:
@@ -266,15 +274,14 @@ def run_inference(args):
     temp_tokens = False
 
     if args.checkpoint_path:
-            if 'tokenizer.json' in os.listdir(os.path.dirname(args.checkpoint_path)):
-                print("LOADING CUSTOM TOKENIZER")
+            if check_custom_temp_tokens(args.checkpoint_path):
+                print(f"LOADING CUSTOM TOKENIZER {args.checkpoint_path}")
                 processor.tokenizer = AutoTokenizer.from_pretrained(os.path.dirname(args.checkpoint_path))
                 temp_tokens = True
                 print("VALIDATING OWN TOKEN ADDITIONS")
                 print(processor.tokenizer.special_tokens_map)
                 print(processor.tokenizer.additional_special_tokens)
                 print(processor.tokenizer.pretrained_vocab_files_map)
-
 
     model = Idefics3ForConditionalGeneration.from_pretrained(
         model_path,

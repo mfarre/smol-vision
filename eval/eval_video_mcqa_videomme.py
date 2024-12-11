@@ -112,13 +112,15 @@ def eval_your_results(
 
     # Load your results
     with open(your_results_path, 'r') as f:
-        a = f.read().split("\n")
-        a = a[1:-1]
-        your_results = []
-        for elem in a:
-            #print(".")
-            #print(elem)
-            your_results.append(json.loads(elem))
+        your_results = json.loads(f.read())
+        # a = f.read().split("\n")
+        # a = a[1:-1]
+        # your_results = []
+        # for elem in a:
+        #     #print(".")
+        #     #print(elem)
+        #     your_results.append(json.loads(elem))
+        # print(f"Loaded {len(a)} results")
 
     if isinstance(video_types, str):
         video_types = video_types.split(",")
@@ -149,7 +151,7 @@ def eval_your_results(
 
         if not skip_missing:
             # Check if the number of files in your results and ground truth are the same
-            assert len(your_results_video_type) == 300, f"Number of files in {video_type} is not 300. Check if there are missing files."
+            assert len(your_results_video_type) == 300, f"Number of files in {video_type} is not 300 but {len(your_results_video_type)}. Check if there are missing files."
 
         for item in your_results_video_type:
 

@@ -282,6 +282,14 @@ def extract_answer_letter(response):
         logger.info('Returning None: No valid answer letter found in response')
         return None
 
+def check_custom_temp_tokens(checkpoint_path):
+    if 'tokenizer.json' in os.listdir(os.path.dirname(args.checkpoint_path)):
+        a = json.loads(open(os.path.dirname(args.checkpoint_path) + 'tokenizer.json',"r").read())
+        for t in a['added_tokens']:
+            if t['content'] == "<frame_0>":
+                return True
+    return False
+
 def run_inference(args):
     # Load model and processor
     if args.checkpoint_path:
@@ -299,8 +307,8 @@ def run_inference(args):
     temp_tokens = False
 
     if args.checkpoint_path:
-            if 'tokenizer.json' in os.listdir(os.path.dirname(args.checkpoint_path)):
-                print("LOADING CUSTOM TOKENIZER")
+            if check_custom_temp_tokens(args.checkpoint_path):
+                print(f"LOADING CUSTOM TOKENIZER {args.checkpoint_path}")
                 processor.tokenizer = AutoTokenizer.from_pretrained(os.path.dirname(args.checkpoint_path))
                 temp_tokens = True
                 print("VALIDATING OWN TOKEN ADDITIONS")
