@@ -284,7 +284,7 @@ def extract_answer_letter(response):
 
 def check_custom_temp_tokens(checkpoint_path):
     if 'tokenizer.json' in os.listdir(os.path.dirname(args.checkpoint_path)):
-        a = json.loads(open(os.path.dirname(args.checkpoint_path) + 'tokenizer.json',"r").read())
+        a = json.loads(open(os.path.dirname(args.checkpoint_path) + '/tokenizer.json',"r").read())
         for t in a['added_tokens']:
             if t['content'] == "<frame_0>":
                 return True

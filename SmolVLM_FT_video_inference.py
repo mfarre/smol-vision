@@ -265,6 +265,14 @@ def generate_response(model, processor, video_path: str, question: str, max_fram
     response = processor.decode(outputs[0], skip_special_tokens=True)
     return response
 
+def check_custom_temp_tokens(checkpoint_path):
+    if 'tokenizer.json' in os.listdir(os.path.dirname(args.checkpoint_path)):
+        a = json.loads(open(os.path.dirname(args.checkpoint_path) + '/tokenizer.json',"r").read())
+        for t in a['added_tokens']:
+            if t['content'] == "<frame_0>":
+                return True
+    return False
+
 def main():
     temp_tokens = False
     # Configuration
@@ -284,7 +292,7 @@ def main():
     model, processor = load_model(checkpoint_path, base_model_id, device)
 
     if checkpoint_path is not None:
-        if 'tokenizer.json' in os.listdir(os.path.dirname(checkpoint_path)):
+        if check_custom_temp_tokens(checkpoint_path):
             print("LOADING CUSTOM TOKENIZER")
             processor.tokenizer = AutoTokenizer.from_pretrained(os.path.dirname(checkpoint_path))
             temp_tokens = True
