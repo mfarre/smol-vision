@@ -280,8 +280,8 @@ def video_collate_fn(examples, processor, max_frames, use_temporal_tokens=True):
         
         # Mask the identified positions
         for pos in positions_to_mask:
-            token = tokens[pos]
-            token_id = processor.tokenizer.convert_tokens_to_ids(token)
+            # token = tokens[pos]
+            # token_id = processor.tokenizer.convert_tokens_to_ids(token)
             labels[i, pos] = -100
 
     batch["labels"] = labels
@@ -306,7 +306,8 @@ def main():
     
     # Generate output directory
     temporal_str = "with_temp" if args.temporal_tokens else "no_temp"
-    output_dir = f"./smolvlm_frames{args.max_frames}_{temporal_str}_lr_1e-5"
+    # output_dir = f"./smolvlm_frames{args.max_frames}_{temporal_str}_lr_1e-5"
+    output_dir = f"./smolvlm_frames{args.max_frames}_{temporal_str}_lr_5e-7"
     
     # Print configuration if main process
     if is_main_process_multi_node():
@@ -387,8 +388,9 @@ def main():
             _attn_implementation="flash_attention_2",
         ).to(DEVICE)
 
-    # Resize token embeddings to account for new tokens
-    model.resize_token_embeddings(len(processor.tokenizer))
+    if args.temporal_tokens:
+        # Resize token embeddings to account for new tokens
+        model.resize_token_embeddings(len(processor.tokenizer))
 
     # Enable gradient checkpointing to reduce memory usage
     model.gradient_checkpointing_enable()
@@ -401,14 +403,37 @@ def main():
 
     # Training arguments
     num_nodes = int(16)
+    # training_args = TrainingArguments(
+    #     num_train_epochs=2,
+    #     per_device_train_batch_size=8,
+    #     per_device_eval_batch_size=1,
+    #     gradient_accumulation_steps=16//num_nodes,
+    #     warmup_ratio = 0.15,
+    #     max_grad_norm = 2.0,
+    #     learning_rate=1e-5 * num_nodes, #Original was 5e-6, 5e-5 bounces back. Trying 5e-7
+    #     lr_scheduler_type="cosine",
+    #     weight_decay=0.01,
+    #     logging_steps=20,
+    #     save_strategy="steps",
+    #     save_steps=250,
+    #     save_total_limit=30,
+    #     optim="adamw_torch" if not (args.use_lora or args.use_qlora) else "paged_adamw_8bit",
+    #     bf16=True,
+    #     output_dir=output_dir,
+    #     remove_unused_columns=False,
+    #     report_to="wandb" if args.wandb else "none",
+    #     logging_dir="./logs",
+    #     logging_first_step=True,
+    #     dataloader_drop_last=True,
+    # )
     training_args = TrainingArguments(
-        num_train_epochs=2,
-        per_device_train_batch_size=8,
+        num_train_epochs=1,
+        per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=16//num_nodes,
-        warmup_ratio = 0.15,
+        warmup_steps = 200 * num_nodes,
         max_grad_norm = 2.0,
-        learning_rate=1e-5 * num_nodes, #Original was 5e-6, 5e-5 bounces back. Trying 5e-7
+        learning_rate=5e-7 * num_nodes, #Original was 5e-6, 5e-5 bounces back. Trying 5e-7
         lr_scheduler_type="cosine",
         weight_decay=0.01,
         logging_steps=20,
