@@ -336,7 +336,7 @@ def main():
 
     # Setup distributed training
     local_rank, world_rank, world_size, local_size = setup_distributed()
-    is_main_process_multi_node = local_rank == 0 and world_rank == 0
+    is_main_process = world_rank == 0
 
     # Load DeepSpeed config
     with open(args.deepspeed) as f:
@@ -362,8 +362,7 @@ def main():
     model = Idefics3ForConditionalGeneration.from_pretrained(
         model_id,
         torch_dtype=torch.bfloat16,
-        _attn_implementation="flash_attention_2",
-        device_map="auto"  # Let DeepSpeed handle device placement
+        _attn_implementation="flash_attention_2"
     )
 
     if args.temporal_tokens:
@@ -374,6 +373,9 @@ def main():
 
     # Initialize dataset
     train_dataset = VideoQADataset(processor, args.max_frames, split="train")
+
+    # Determine if this is the main process across all nodes
+    is_main_process_multi_node = local_rank == 0 and world_rank == 0
 
     # Training arguments
     training_args = TrainingArguments(
