@@ -16,6 +16,8 @@ from torch.utils.data import Dataset
 from torch.utils.data.distributed import DistributedSampler
 from datasets import load_dataset
 import argparse
+import torch.nn as nn
+
 
 from transformers import (
     AutoProcessor, 
@@ -61,7 +63,7 @@ class VideoFrameExtractor:
         
         return image.crop((left, top, right, bottom))
 
-    def extract_frames_from_video(self, video_path: str, content_type: str) -> List[Image.Image]:
+    def extract_frames_from_video(self, video_path: str) -> List[Image.Image]:
         """Extract frames from video file using decord"""
         decord.bridge.set_bridge('torch')  # Using torch bridge for better GPU support
         
@@ -176,20 +178,25 @@ class VideoQADataset(Dataset):
         self.frame_extractor = VideoFrameExtractor(max_frames)
         
         # Load HF dataset
-        self.data = load_dataset("HuggingFaceFV/longvumix", split=split)
+        self.data = load_dataset("HuggingFaceFV/longvucauldron", split=split)
     
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        video_path = os.path.join('/fsx/miquel/longvu-dataset/composition', self.data[idx]['video'])
         content_type = self.data[idx].get('type', 'video')
         rank = torch.distributed.get_rank()
-        logger.info(f"[Rank {rank}] Loading video: {video_path}")
 
-        frames = self.frame_extractor.extract_frames(video_path,content_type)
-        if len(frames) == 0:
-            logger.info(f"Zero frames for {video_path}")
+        if content_type != 'only_text':
+            video_path = os.path.join('/fsx/miquel/longvu-dataset/composition', self.data[idx]['video'])
+            logger.info(f"[Rank {rank}] Loading video: {video_path}")
+            frames = self.frame_extractor.extract_frames(video_path,content_type)
+            if len(frames) == 0:
+                logger.info(f"Zero frames for {video_path}")
+        else:
+            logger.info(f"[Rank {rank}] Loading text Q&A")
+            frames = []
+
         conversations = self.data[idx]['conversations']
         question = next(conv for conv in conversations if conv['from'] == 'human')['value'].split('<image>\n')[0]
         answer = next(conv for conv in conversations if conv['from'] == 'gpt')['value']
@@ -236,44 +243,134 @@ def find_row_col_patterns(tokens):
             tokens[i+6] == '_' and
             tokens[i+7].isdigit() and int(tokens[i+7]) in range(1, 10) and
             tokens[i+8] == '>'):
-            print(f"\nFound row-col pattern at position {i}:")
-            print(f"Complete sequence: {' '.join(tokens[i:i+9])}")
+            # print(f"\nFound row-col pattern at position {i}:")
+            # print(f"Complete sequence: {' '.join(tokens[i:i+9])}")
             mask_positions.extend([i, i+1, i+2, i+3, i+4, i+5, i+6, i+7, i+8])
     return mask_positions
 
 
+# def video_collate_fn(examples, processor, max_frames, use_temporal_tokens=True):
+#     texts = []
+#     images_list = []
+    
+#     # Store default processor settings
+#     default_size = processor.image_processor.size
+#     default_do_resize = processor.image_processor.do_resize
+#     default_do_image_splitting = processor.image_processor.do_image_splitting
+    
+#     for example in examples:
+#         frames = example['frames']
+#         question = example['question']
+#         answer = example['answer']
+#         content_type = example.get('type', 'video')  # Get content type, default to 'video'
+        
+#         # Apply appropriate processor settings based on content type
+#         if content_type == 'video':
+#             processor.image_processor.size = (384,384)
+#             processor.image_processor.do_resize = False
+#             processor.image_processor.do_image_splitting = False
+#         else:
+#             # Use default settings for non-video content
+#             processor.image_processor.size = {'longest_edge':1920} #Expanding x5
+#             processor.image_processor.do_resize = default_do_resize
+#             processor.image_processor.do_image_splitting = default_do_image_splitting
+        
+#         # Add temporal tokens between frames
+#         image_tokens = []
+#         for i in range(len(frames)):
+#             image_tokens.append({"type": "image"})
+#             if i < len(frames) - 1 and use_temporal_tokens:
+#                 # Add temporal token between frames
+#                 image_tokens.append({"type": "text", "text": f"<frame_{i}>"})
+        
+#         messages = [
+#             {
+#                 "role": "user",
+#                 "content": [
+#                     {"type": "text", "text": "Answer briefly."},
+#                     *image_tokens,
+#                     {"type": "text", "text": question}
+#                 ]
+#             },
+#             {
+#                 "role": "assistant",
+#                 "content": [
+#                     {"type": "text", "text": answer}
+#                 ]
+#             }
+#         ]
+
+#         text = processor.apply_chat_template(messages, add_generation_prompt=False)
+#         example_images = [img for img in frames]
+        
+#         texts.append(text.strip())
+#         images_list.append(example_images)  # Keep images grouped by example
+    
+#     # Restore default settings before batch processing
+#     processor.image_processor.size = default_size
+#     processor.image_processor.do_resize = default_do_resize
+#     processor.image_processor.do_image_splitting = default_do_image_splitting
+    
+#     if len(images_list) == 0:
+#         images_list = None
+#     batch = processor(text=texts, images=images_list, return_tensors="pt", padding=True)
+
+#     # Rest of the function remains the same
+#     image_token_id = processor.tokenizer.additional_special_tokens_ids[
+#         processor.tokenizer.additional_special_tokens.index("<image>")]
+#     fake_token_around_image_id = processor.tokenizer.additional_special_tokens_ids[
+#         processor.tokenizer.additional_special_tokens.index("<fake_token_around_image>")]
+#     end_of_utterance_id = processor.tokenizer.additional_special_tokens_ids[
+#         processor.tokenizer.additional_special_tokens.index("<end_of_utterance>")]
+
+#     labels = batch["input_ids"].clone()
+#     labels[labels == processor.tokenizer.pad_token_id] = -100
+#     labels[labels == image_token_id] = -100
+#     labels[labels == fake_token_around_image_id] = -100
+#     labels[labels == end_of_utterance_id] = -100
+
+#     if use_temporal_tokens:
+#         temporal_token_ids = [processor.tokenizer.convert_tokens_to_ids(f"<frame_{i}>") 
+#                             for i in range(max_frames)]
+#         for token_id in temporal_token_ids:
+#             labels[labels == token_id] = -100
+
+#     for i in range(len(batch["input_ids"])):
+#         tokens = processor.tokenizer.convert_ids_to_tokens(batch["input_ids"][i])
+#         positions_to_mask = find_global_img_patterns(tokens) + find_row_col_patterns(tokens)
+#         for pos in positions_to_mask:
+#             labels[i, pos] = -100
+
+
+#     batch["labels"] = labels
+    
+#     return batch
+
 def video_collate_fn(examples, processor, max_frames, use_temporal_tokens=True):
-    texts = []
-    images_list = []
+    processed_batches = []
     
-    # Store default processor settings
-    default_size = processor.image_processor.size
-    default_do_resize = processor.image_processor.do_resize
-    default_do_image_splitting = processor.image_processor.do_image_splitting
-    
+    # Process each example individually
     for example in examples:
         frames = example['frames']
         question = example['question']
         answer = example['answer']
-        content_type = example.get('type', 'video')  # Get content type, default to 'video'
+        content_type = example.get('type', 'video')
         
         # Apply appropriate processor settings based on content type
         if content_type == 'video':
-            processor.image_processor.size = (384,384)
+            processor.image_processor.size = (384, 384)
             processor.image_processor.do_resize = False
             processor.image_processor.do_image_splitting = False
         else:
-            # Use default settings for non-video content
-            processor.image_processor.size = {'longest_edge':1920} #Expanding x5
-            processor.image_processor.do_resize = default_do_resize
-            processor.image_processor.do_image_splitting = default_do_image_splitting
+            processor.image_processor.size = {'longest_edge': 1920}
+            processor.image_processor.do_resize = True
+            processor.image_processor.do_image_splitting = True
         
         # Add temporal tokens between frames
         image_tokens = []
         for i in range(len(frames)):
             image_tokens.append({"type": "image"})
             if i < len(frames) - 1 and use_temporal_tokens:
-                # Add temporal token between frames
                 image_tokens.append({"type": "text", "text": f"<frame_{i}>"})
         
         messages = [
@@ -294,48 +391,188 @@ def video_collate_fn(examples, processor, max_frames, use_temporal_tokens=True):
         ]
 
         text = processor.apply_chat_template(messages, add_generation_prompt=False)
-        example_images = [img for img in frames]
         
-        texts.append(text.strip())
-        images_list.append(example_images)  # Keep images grouped by example
-    
-    # Restore default settings before batch processing
-    processor.image_processor.size = default_size
-    processor.image_processor.do_resize = default_do_resize
-    processor.image_processor.do_image_splitting = default_do_image_splitting
-    
-    batch = processor(text=texts, images=images_list, return_tensors="pt", padding=True)
+        # Process single example
+        single_batch = processor(
+            text=text.strip(),
+            images=[img for img in frames] if frames else None,
+            return_tensors="pt",
+            padding=False  # Don't pad individual examples yet
+        )
+        
+        # Handle labels for this example
+        image_token_id = processor.tokenizer.additional_special_tokens_ids[
+            processor.tokenizer.additional_special_tokens.index("<image>")]
+        fake_token_around_image_id = processor.tokenizer.additional_special_tokens_ids[
+            processor.tokenizer.additional_special_tokens.index("<fake_token_around_image>")]
+        end_of_utterance_id = processor.tokenizer.additional_special_tokens_ids[
+            processor.tokenizer.additional_special_tokens.index("<end_of_utterance>")]
 
-    # Rest of the function remains the same
-    image_token_id = processor.tokenizer.additional_special_tokens_ids[
-        processor.tokenizer.additional_special_tokens.index("<image>")]
-    fake_token_around_image_id = processor.tokenizer.additional_special_tokens_ids[
-        processor.tokenizer.additional_special_tokens.index("<fake_token_around_image>")]
-    end_of_utterance_id = processor.tokenizer.additional_special_tokens_ids[
-        processor.tokenizer.additional_special_tokens.index("<end_of_utterance>")]
+        labels = single_batch["input_ids"].clone()
+        labels[labels == processor.tokenizer.pad_token_id] = -100
+        labels[labels == image_token_id] = -100
+        labels[labels == fake_token_around_image_id] = -100
+        labels[labels == end_of_utterance_id] = -100
 
-    labels = batch["input_ids"].clone()
-    labels[labels == processor.tokenizer.pad_token_id] = -100
-    labels[labels == image_token_id] = -100
-    labels[labels == fake_token_around_image_id] = -100
-    labels[labels == end_of_utterance_id] = -100
+        if use_temporal_tokens:
+            temporal_token_ids = [processor.tokenizer.convert_tokens_to_ids(f"<frame_{i}>") 
+                                for i in range(max_frames)]
+            for token_id in temporal_token_ids:
+                labels[labels == token_id] = -100
 
-    if use_temporal_tokens:
-        temporal_token_ids = [processor.tokenizer.convert_tokens_to_ids(f"<frame_{i}>") 
-                            for i in range(max_frames)]
-        for token_id in temporal_token_ids:
-            labels[labels == token_id] = -100
-
-    for i in range(len(batch["input_ids"])):
-        tokens = processor.tokenizer.convert_ids_to_tokens(batch["input_ids"][i])
+        tokens = processor.tokenizer.convert_ids_to_tokens(single_batch["input_ids"][0])
         positions_to_mask = find_global_img_patterns(tokens) + find_row_col_patterns(tokens)
         for pos in positions_to_mask:
-            labels[i, pos] = -100
+            labels[0, pos] = -100
 
-
-    batch["labels"] = labels
+        single_batch["labels"] = labels
+        processed_batches.append(single_batch)
     
-    return batch
+    # Find maximum length
+    max_length = max(batch["input_ids"].size(1) for batch in processed_batches)
+    
+    # Pad each batch to max_length
+    for i in range(len(processed_batches)):
+        cur_len = processed_batches[i]["input_ids"].size(1)
+        if cur_len < max_length:
+            # Pad input_ids
+            padding = torch.full(
+                (1, max_length - cur_len),
+                processor.tokenizer.pad_token_id,
+                device=processed_batches[i]["input_ids"].device,
+                dtype=processed_batches[i]["input_ids"].dtype
+            )
+            processed_batches[i]["input_ids"] = torch.cat([processed_batches[i]["input_ids"], padding], dim=1)
+            
+            # Pad attention_mask
+            attention_padding = torch.zeros(
+                (1, max_length - cur_len),
+                device=processed_batches[i]["attention_mask"].device,
+                dtype=processed_batches[i]["attention_mask"].dtype
+            )
+            processed_batches[i]["attention_mask"] = torch.cat([processed_batches[i]["attention_mask"], attention_padding], dim=1)
+            
+            # Pad labels
+            labels_padding = torch.full(
+                (1, max_length - cur_len),
+                -100,
+                device=processed_batches[i]["labels"].device,
+                dtype=processed_batches[i]["labels"].dtype
+            )
+            processed_batches[i]["labels"] = torch.cat([processed_batches[i]["labels"], labels_padding], dim=1)
+    
+    # Combine all processed batches
+    combined_batch = {
+        "input_ids": torch.cat([batch["input_ids"] for batch in processed_batches], dim=0),
+        "attention_mask": torch.cat([batch["attention_mask"] for batch in processed_batches], dim=0),
+        "labels": torch.cat([batch["labels"] for batch in processed_batches], dim=0),
+    }
+    
+    # Add pixel_values if any example has images
+    if any("pixel_values" in batch for batch in processed_batches):
+        # Get the shape from the first batch with pixel_values
+        first_image_batch = next(batch for batch in processed_batches if "pixel_values" in batch)
+        pixel_shape = first_image_batch["pixel_values"].shape[2:]  # Shape after batch and frame dimensions
+        
+        # Find max number of frames across all batches
+        max_frames_in_batch = max(
+            batch["pixel_values"].size(1) if "pixel_values" in batch else 0 
+            for batch in processed_batches
+        )
+        
+        # Create padded pixel values tensor
+        pixel_values = []
+        for batch in processed_batches:
+            if "pixel_values" in batch:
+                current_frames = batch["pixel_values"].size(1)
+                if current_frames < max_frames_in_batch:
+                    # Pad with zeros up to max_frames
+                    padding = torch.zeros(
+                        (1, max_frames_in_batch - current_frames, *pixel_shape),
+                        device=batch["pixel_values"].device,
+                        dtype=batch["pixel_values"].dtype
+                    )
+                    pixel_values.append(torch.cat([batch["pixel_values"], padding], dim=1))
+                else:
+                    pixel_values.append(batch["pixel_values"])
+            else:
+                # Add zero tensor with correct shape for text-only examples
+                pixel_values.append(
+                    torch.zeros((1, max_frames_in_batch, *pixel_shape), 
+                              device=batch["input_ids"].device,
+                              dtype=torch.float32)
+                )
+        
+        combined_batch["pixel_values"] = torch.cat(pixel_values, dim=0)
+    
+    return combined_batch
+
+
+class CustomTrainer(Trainer):
+    def _wrap_model(self, model, training=True, dataloader=None):
+        print(f"\n=== Wrapping Model ===")
+        print(f"Training mode: {training}")
+        print(f"Local rank: {self.args.local_rank}")
+        print(f"CUDA Memory before DDP: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+        
+        if not training:
+            return model
+
+        if self.args.local_rank != -1:
+            try:
+                print("Attempting DDP wrap...")
+                kwargs = {
+                    "device_ids": [self.args.local_rank] if self.args.local_rank != -1 else None,
+                    "output_device": self.args.local_rank if self.args.local_rank != -1 else None,
+                    "find_unused_parameters": True,
+                    "static_graph": True,
+                    "gradient_as_bucket_view": True
+                }
+                model = nn.parallel.DistributedDataParallel(model, **kwargs)
+                print("DDP wrap successful")
+                print(f"CUDA Memory after DDP: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+            except Exception as e:
+                print(f"Error during DDP wrap: {str(e)}")
+                raise
+
+        return model
+
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        print(f"\n=== Training Step ===")
+        print(f"Batch size: {inputs['input_ids'].shape[0]}")
+        print(f"CUDA Memory before forward: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+        
+        model.train()
+        inputs = self._prepare_inputs(inputs)
+        
+        try:
+            with self.compute_loss_context_manager():
+                loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
+            print(f"Forward pass successful, loss: {loss.item()}")
+            print(f"CUDA Memory after forward: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+
+            if self.args.gradient_accumulation_steps > 1:
+                loss = loss / self.args.gradient_accumulation_steps
+
+            print("Starting backward pass...")
+            try:
+                # Remove the **kwargs here
+                self.accelerator.backward(loss)  
+                print("Backward pass successful")
+            except Exception as e:
+                print(f"Error during backward pass: {str(e)}")
+                print(f"Loss device: {loss.device}")
+                print(f"Model parameters devices: {[p.device for p in model.parameters()][:5]}")
+                raise
+            print(f"CUDA Memory after backward: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+
+        except Exception as e:
+            print(f"Error during training step: {str(e)}")
+            shapes = {k: v.shape if hasattr(v, 'shape') else type(v) for k, v in inputs.items()}
+            print(f"Input shapes: {shapes}")
+            raise
+
+        return loss.detach() / self.args.gradient_accumulation_steps
 
 def main():
     parser = argparse.ArgumentParser(description='Video-LLM Training')
@@ -442,7 +679,10 @@ def main():
         model.resize_token_embeddings(len(processor.tokenizer))
 
     # Enable gradient checkpointing to reduce memory usage
-    model.gradient_checkpointing_enable()
+    model.config.use_cache = False
+    model.config.use_reentrant_checkpointing = False
+    # model.gradient_checkpointing_enable()
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
     # Initialize dataset
     train_dataset = VideoQADataset(processor, args.max_frames, split="train")
@@ -452,14 +692,38 @@ def main():
 
     # Training arguments
     num_nodes = int(16)
+    training_args = TrainingArguments(
+        num_train_epochs=1,
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=1,
+        gradient_accumulation_steps=32//num_nodes,
+        warmup_ratio = 0.15,
+        max_grad_norm = 2.0,
+        learning_rate=5e-6 * num_nodes,
+        lr_scheduler_type="cosine",
+        weight_decay=0.01,
+        logging_steps=20,
+        save_strategy="steps",
+        save_steps=250,
+        save_total_limit=30,
+        optim="adamw_torch" if not (args.use_lora or args.use_qlora) else "paged_adamw_8bit",
+        bf16=True,
+        output_dir=output_dir,
+        remove_unused_columns=False,
+        report_to="wandb" if args.wandb else "none",
+        logging_dir="./logs",
+        logging_first_step=True,
+        dataloader_drop_last=True,
+        ddp_find_unused_parameters=True
+    )
     # training_args = TrainingArguments(
-    #     num_train_epochs=2,
-    #     per_device_train_batch_size=8,
+    #     num_train_epochs=1,
+    #     per_device_train_batch_size=1,
     #     per_device_eval_batch_size=1,
     #     gradient_accumulation_steps=16//num_nodes,
-    #     warmup_ratio = 0.15,
+    #     warmup_steps = 200 * num_nodes,
     #     max_grad_norm = 2.0,
-    #     learning_rate=1e-5 * num_nodes, #Original was 5e-6, 5e-5 bounces back. Trying 5e-7
+    #     learning_rate=5e-7 * num_nodes, #Original was 5e-6, 5e-5 bounces back. Trying 5e-7
     #     lr_scheduler_type="cosine",
     #     weight_decay=0.01,
     #     logging_steps=20,
@@ -475,29 +739,6 @@ def main():
     #     logging_first_step=True,
     #     dataloader_drop_last=True,
     # )
-    training_args = TrainingArguments(
-        num_train_epochs=1,
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
-        gradient_accumulation_steps=16//num_nodes,
-        warmup_steps = 200 * num_nodes,
-        max_grad_norm = 2.0,
-        learning_rate=5e-7 * num_nodes, #Original was 5e-6, 5e-5 bounces back. Trying 5e-7
-        lr_scheduler_type="cosine",
-        weight_decay=0.01,
-        logging_steps=20,
-        save_strategy="steps",
-        save_steps=250,
-        save_total_limit=30,
-        optim="adamw_torch" if not (args.use_lora or args.use_qlora) else "paged_adamw_8bit",
-        bf16=True,
-        output_dir=output_dir,
-        remove_unused_columns=False,
-        report_to="wandb" if args.wandb else "none",
-        logging_dir="./logs",
-        logging_first_step=True,
-        dataloader_drop_last=True,
-    )
 
     # Save added new tokens
     processor.tokenizer.save_pretrained(training_args.output_dir)
