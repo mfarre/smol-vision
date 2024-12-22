@@ -4,12 +4,13 @@
 # BASE_NAME="frames8_no_temp_lr_1e-5"
 # BASE_NAME="frames8_with_temp_lr_1e-5"
 # BASE_NAME="frames50_with_temp_lr_1e-5"
-MAX_FRAMES=8
+MAX_FRAMES=50
 # BASE_NAME="frames${MAX_FRAMES}_no_temp_lr_1e-5"
-BASE_NAME="frames${MAX_FRAMES}_with_temp_lr_1e-5"
+# BASE_NAME="frames${MAX_FRAMES}_with_temp_lr_1e-5"
+BASE_NAME="frames${MAX_FRAMES}_no_temp_lr_1e-5"
 
-CHECKPOINT_BASE="/fsx/miquel/smol-vision/smolvlm_${BASE_NAME}/checkpoint-"
-STEPS=(250 500 1000 1248)
+CHECKPOINT_BASE="/fsx/miquel/smol-vision/smolvlm_longvucauldron_${BASE_NAME}/checkpoint-"
+STEPS=(250 500 1000 1250 1500 1736)
 
 for step in "${STEPS[@]}"; do
     echo "Submitting egoschema job ${CHECKPOINT_BASE}${step}"
