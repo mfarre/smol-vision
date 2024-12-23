@@ -43,7 +43,22 @@ class VideoFrameExtractor:
     def __init__(self, max_frames: int = 100, fps: float = 2.0):
         self.max_frames = max_frames
         self.fps = fps
-        
+
+    def resize_and_center_crop(self, image: Image.Image, target_size: int) -> Image.Image:
+        width, height = image.size
+        if width < height:
+            new_width = target_size
+            new_height = int(height * (target_size / width))
+        else:
+            new_height = target_size
+            new_width = int(width * (target_size / height))
+        image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        left = (new_width - target_size) // 2
+        top = (new_height - target_size) // 2
+        right = left + target_size
+        bottom = top + target_size
+        return image.crop((left, top, right, bottom))
+
     def extract_frames_from_video(self, video_path: str) -> tuple[List[Image.Image], List[str]]:
         """Extract frames from video file using decord"""
         decord.bridge.set_bridge('torch')
