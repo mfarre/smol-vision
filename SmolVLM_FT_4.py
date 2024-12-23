@@ -40,44 +40,39 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class VideoFrameExtractor:
-    def __init__(self, max_frames: int = 50):
+    def __init__(self, max_frames: int = 100, fps: float = 2.0):
         self.max_frames = max_frames
+        self.fps = fps
         
-    def resize_and_center_crop(self, image: Image.Image, target_size: int) -> Image.Image:
-        """Resize the image preserving aspect ratio and then center crop."""
-        width, height = image.size
-        
-        if width < height:
-            new_width = target_size
-            new_height = int(height * (target_size / width))
-        else:
-            new_height = target_size
-            new_width = int(width * (target_size / height))
-            
-        image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        
-        left = (new_width - target_size) // 2
-        top = (new_height - target_size) // 2
-        right = left + target_size
-        bottom = top + target_size
-        
-        return image.crop((left, top, right, bottom))
-
-    def extract_frames_from_video(self, video_path: str) -> List[Image.Image]:
+    def extract_frames_from_video(self, video_path: str) -> tuple[List[Image.Image], List[str]]:
         """Extract frames from video file using decord"""
-        decord.bridge.set_bridge('torch')  # Using torch bridge for better GPU support
+        decord.bridge.set_bridge('torch')
         
         try:
-            # Load video with decord
             vr = VideoReader(video_path)
             total_frames = len(vr)
+            fps_original = vr.get_avg_fps()
+            duration = total_frames / fps_original
             
-            # Calculate frame indices for sampling
-            if total_frames <= self.max_frames:
-                frame_indices = list(range(total_frames))
-            else:
-                # Sample frames evenly
-                frame_indices = np.linspace(0, total_frames - 1, self.max_frames, dtype=int).tolist()
+            # Calculate frame indices based on desired fps
+            if self.fps > 0:
+                # For video/gif, use fps-based sampling
+                step = fps_original / self.fps  # frames to skip
+                frame_indices = []
+                timestamps = []
+                current_frame = 0
+                
+                while current_frame < total_frames:
+                    frame_indices.append(int(current_frame))
+                    time_in_seconds = current_frame / fps_original
+                    minutes = int(time_in_seconds // 60)
+                    seconds = int(time_in_seconds % 60)
+                    timestamps.append(f"{minutes:02d}:{seconds:02d}")
+                    current_frame += step
+                    
+                    if len(frame_indices) >= self.max_frames:
+                        print(f"MAXIMUM FRAMES {self.max_frames} reached for {video_path}")
+                        break
             
             # Read frames
             frames = vr.get_batch(frame_indices)
@@ -85,34 +80,59 @@ class VideoFrameExtractor:
             # Convert to PIL and process
             processed_frames = []
             for frame in frames:
-                # Convert from torch tensor to PIL
                 frame = frame.numpy()
                 pil_image = Image.fromarray(frame)
                 pil_image = self.resize_and_center_crop(pil_image, 384)
                 processed_frames.append(pil_image)
                 
-            return processed_frames
+            return processed_frames, timestamps
             
         except Exception as e:
             print(f"Error processing video {video_path}: {str(e)}")
             raise
 
-    def extract_frames_from_gif(self, gif_path: str) -> List[Image.Image]:
+    def extract_frames_from_gif(self, gif_path: str) -> tuple[List[Image.Image], List[str]]:
         """Extract frames from GIF file"""
         gif = Image.open(gif_path)
         frames = []
+        durations = []
+        total_duration = 0
+        
         try:
             while True:
                 frames.append(gif.copy())
+                # Get frame duration in milliseconds (default to 100ms if not specified)
+                duration = gif.info.get('duration', 100)
+                durations.append(duration)
+                total_duration += duration
                 gif.seek(gif.tell() + 1)
         except EOFError:
             pass
 
-        if len(frames) > self.max_frames:
-            indices = np.linspace(0, len(frames) - 1, self.max_frames, dtype=int)
+        # Convert total_duration from ms to seconds
+        total_duration_sec = total_duration / 1000
+        
+        if self.fps > 0:
+            # Calculate how many frames we want based on fps
+            target_frames = min(int(total_duration_sec * self.fps), self.max_frames)
+            indices = np.linspace(0, len(frames) - 1, target_frames, dtype=int)
+            
+            # Calculate timestamps
+            timestamps = []
+            cumulative_time = 0
+            for idx in indices:
+                cumulative_time = sum(durations[:idx]) / 1000  # Convert to seconds
+                minutes = int(cumulative_time // 60)
+                seconds = int(cumulative_time % 60)
+                timestamps.append(f"{minutes:02d}:{seconds:02d}")
+            
             frames = [frames[i] for i in indices]
+        else:
+            #In that case we process it as a sequence
+            print(f"Did not manage to get FPS for {gif_path}")            
+            timestamps = [None] * len(frames)  
 
-        return [self.resize_and_center_crop(frame.convert('RGB'), 384) for frame in frames]
+        return [self.resize_and_center_crop(frame.convert('RGB'), 384) for frame in frames], timestamps
 
     def extract_jpeg(self, jpeg_path: str) -> List[Image.Image]:
         """Load and return a single image"""
@@ -164,18 +184,19 @@ class VideoFrameExtractor:
     def extract_frames(self, path: str, content_type: str) -> List[Image.Image]:
         """Extract frames from video file, GIF, or folder of images"""
         if os.path.isdir(path):
-            return self.extract_frames_from_folder(path, content_type)
+            frames = self.extract_frames_from_folder(path, content_type)
+            return frames,[None] * len(frames)
         elif path.lower().endswith('.gif'):
             return self.extract_frames_from_gif(path)
         elif path.lower().endswith('.jpeg'):
-            return self.extract_jpeg(path)
+            return self.extract_jpeg(path), [None]
         else:
             return self.extract_frames_from_video(path)
 
 class VideoQADataset(Dataset):
-    def __init__(self, processor, max_frames: int = 50, split="train"):
+    def __init__(self, processor, max_frames: int = 100, fps: float = 2.0, split="train"):
         self.processor = processor
-        self.frame_extractor = VideoFrameExtractor(max_frames)
+        self.frame_extractor = VideoFrameExtractor(max_frames, fps)
         
         # Load HF dataset
         self.data = load_dataset("HuggingFaceFV/longvucauldron", split=split)
@@ -190,12 +211,13 @@ class VideoQADataset(Dataset):
         if content_type != 'only_text':
             video_path = os.path.join('/fsx/miquel/longvu-dataset/composition', self.data[idx]['video'])
             logger.info(f"[Rank {rank}] Loading video: {video_path}")
-            frames = self.frame_extractor.extract_frames(video_path,content_type)
+            frames, timestamps = self.frame_extractor.extract_frames(video_path,content_type)
             if len(frames) == 0:
                 logger.info(f"Zero frames for {video_path}")
         else:
             logger.info(f"[Rank {rank}] Loading text Q&A")
             frames = []
+            timestamps = []
 
         conversations = self.data[idx]['conversations']
         question = next(conv for conv in conversations if conv['from'] == 'human')['value'].split('<image>\n')[0]
@@ -203,6 +225,7 @@ class VideoQADataset(Dataset):
             
         return {
             'frames': frames,
+            'timestamps': timestamps,
             'question': question,
             'answer': answer,
             'type': content_type
@@ -255,6 +278,7 @@ def video_collate_fn(examples, processor, max_frames, use_temporal_tokens=True):
     # Process each example individually
     for example in examples:
         frames = example['frames']
+        timestamps = example.get('timestamps', [None] * len(frames))  # Get timestamps if available
         question = example['question']
         answer = example['answer']
         content_type = example.get('type', 'video')
@@ -272,9 +296,11 @@ def video_collate_fn(examples, processor, max_frames, use_temporal_tokens=True):
         # Add temporal tokens between frames
         image_tokens = []
         for i in range(len(frames)):
+            if timestamps[i] is not None:
+                next_timestamp = timestamps[i + 1] if i < len(frames) - 1 else f"{timestamps[i]}+1s" #HACK
+                image_tokens.append({"type": "text", "text": f"clip from {timestamps[i]}-{next_timestamp}:"})            
             image_tokens.append({"type": "image"})
-            if i < len(frames) - 1 and use_temporal_tokens:
-                image_tokens.append({"type": "text", "text": f"<frame_{i}>"})
+
         
         messages = [
             {
@@ -294,7 +320,17 @@ def video_collate_fn(examples, processor, max_frames, use_temporal_tokens=True):
         ]
 
         text = processor.apply_chat_template(messages, add_generation_prompt=False)
-        
+
+        # Debug print the tokenized output
+        print(f"\n=== Example  ===")
+        print(f"Content type: {content_type}")
+        print(f"Number of frames: {len(frames)}")
+        print(f"Timestamps available: {timestamps[0] is not None}")
+        print("\nTokenized text:")
+        tokens = processor.tokenizer.tokenize(text)
+        for idx, token in enumerate(tokens):
+            print(f"{idx}: {token}")
+
         # Process single example
         single_batch = processor(
             text=text.strip(),
@@ -479,7 +515,8 @@ class CustomTrainer(Trainer):
 
 def main():
     parser = argparse.ArgumentParser(description='Video-LLM Training')
-    parser.add_argument('--max_frames', type=int, default=50, help='Maximum number of frames per video')
+    parser.add_argument('--max_frames', type=int, default=100, help='Maximum number of frames per video')
+    parser.add_argument('--fps', type=float, default=2.0, help='Frames per second to extract from videos/GIFs')
     parser.add_argument('--temporal_tokens', action='store_true', help='Enable temporal tokens between frames')
     parser.add_argument('--wandb', action='store_true', help='Enable wandb logging')
     parser.add_argument('--use_lora', action='store_true', default = False, help='Enable LoRA training')
@@ -574,7 +611,7 @@ def main():
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
     # Initialize dataset
-    train_dataset = VideoQADataset(processor, args.max_frames, split="train")
+    train_dataset = VideoQADataset(processor, args.max_frames, args.fps, split="train")
     train_sampler = DistributedSampler(train_dataset)
     
 
