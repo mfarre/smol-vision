@@ -337,16 +337,16 @@ def video_collate_fn(examples, processor, max_frames, use_temporal_tokens=True):
 
         text = processor.apply_chat_template(messages, add_generation_prompt=False)
 
-        # Debug print the tokenized output
-        print(f"\n=== Example  ===")
-        print(f"Content type: {content_type}")
-        print(f"Number of frames: {len(frames)}")
-        if len(timestamps) > 0:
-            print(f"Timestamps available: {timestamps[0] is not None}")
-        print("\nTokenized text:")
-        tokens = processor.tokenizer.tokenize(text)
-        for idx, token in enumerate(tokens):
-            print(f"{idx}: {token}")
+        # # Debug print the tokenized output
+        # print(f"\n=== Example  ===")
+        # print(f"Content type: {content_type}")
+        # print(f"Number of frames: {len(frames)}")
+        # if len(timestamps) > 0:
+        #     print(f"Timestamps available: {timestamps[0] is not None}")
+        # print("\nTokenized text:")
+        # tokens = processor.tokenizer.tokenize(text)
+        # for idx, token in enumerate(tokens):
+        #     print(f"{idx}: {token}")
 
         # Process single example
         single_batch = processor(
