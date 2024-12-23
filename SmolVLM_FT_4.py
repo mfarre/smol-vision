@@ -550,7 +550,7 @@ def main():
     # Generate output directory
     temporal_str = "with_temp" if args.temporal_tokens else "no_temp"
     # output_dir = f"./smolvlm_frames{args.max_frames}_{temporal_str}_lr_1e-5"
-    output_dir = f"./smolvlm_longvucauldron_FPS_fps{int(args.fps)}_frames{args.max_frames}_{temporal_str}_lr_3e-7"
+    output_dir = f"./smolvlm_longvucauldron_FPS_fps{int(args.fps)}_frames{args.max_frames}_{temporal_str}_lr_5e-7"
     
     # Print configuration if main process
     if is_main_process_multi_node():
@@ -642,7 +642,7 @@ def main():
         gradient_accumulation_steps=32//num_nodes,
         warmup_ratio = 0.15,
         max_grad_norm = 2.0,
-        learning_rate=3e-7 * num_nodes, #prev: 5e-6
+        learning_rate=5e-7 * num_nodes, #prev: 5e-6
         lr_scheduler_type="cosine",
         weight_decay=0.01,
         logging_steps=20,

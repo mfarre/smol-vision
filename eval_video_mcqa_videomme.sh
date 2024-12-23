@@ -82,7 +82,8 @@ python eval/eval_video_mcqa_videomme.py \
     --return_categories_accuracy \
     --return_sub_categories_accuracy \
     --return_task_types_accuracy \
-    --skip_missing \
+    --skip_missing
+
 echo "Checkpoint Path: $CHECKPOINT_PATH"
 
 # python eval/eval_video_mcqa_videomme.py \
