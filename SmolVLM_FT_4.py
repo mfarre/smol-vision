@@ -88,7 +88,8 @@ class VideoFrameExtractor:
                     if len(frame_indices) >= self.max_frames:
                         print(f"MAXIMUM FRAMES {self.max_frames} reached for {video_path}")
                         break
-            
+            else:
+                print(f"Failed to get FPS reading {video_path}")
             # Read frames
             frames = vr.get_batch(frame_indices)
             
@@ -340,7 +341,8 @@ def video_collate_fn(examples, processor, max_frames, use_temporal_tokens=True):
         print(f"\n=== Example  ===")
         print(f"Content type: {content_type}")
         print(f"Number of frames: {len(frames)}")
-        print(f"Timestamps available: {timestamps[0] is not None}")
+        if len(timestamps) > 0:
+            print(f"Timestamps available: {timestamps[0] is not None}")
         print("\nTokenized text:")
         tokens = processor.tokenizer.tokenize(text)
         for idx, token in enumerate(tokens):
@@ -548,7 +550,7 @@ def main():
     # Generate output directory
     temporal_str = "with_temp" if args.temporal_tokens else "no_temp"
     # output_dir = f"./smolvlm_frames{args.max_frames}_{temporal_str}_lr_1e-5"
-    output_dir = f"./smolvlm_longvucauldron_frames{args.max_frames}_{temporal_str}_lr_3e-7"
+    output_dir = f"./smolvlm_longvucauldron_FPS_fps{int(args.fps)}_frames{args.max_frames}_{temporal_str}_lr_3e-7"
     
     # Print configuration if main process
     if is_main_process_multi_node():
