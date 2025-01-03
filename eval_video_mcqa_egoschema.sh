@@ -25,10 +25,11 @@ if [ ! -f "$output_file" ]; then
     for IDX in $(seq 0 $((CHUNKS-1))); do
         # select the GPUs for the task
         gpu_devices=$(IFS=,; echo "${GPULIST[*]:$(($IDX*$GPUS_PER_TASK)):$GPUS_PER_TASK}")
-        TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES=${gpu_devices} python3 eval/inference_video_mcqa_egoschema.py \
+        TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES=${gpu_devices} python3 eval/inference_video_mcqa_egoschema_fps.py \
             --video-folder ${EVAL_DATA_DIR}/egoschema/good_clips_git \
             --question-file ${EVAL_DATA_DIR}/egoschema/questions.json \
             --max-frames ${MAX_FRAMES} \
+            --fps 2.0 \
             ${CHECKPOINT_PARAM} \
             --answer-file ${OUTPUT_DIR}/egoschema/answers/${CKPT_NAME}/${ADAPTER_STEPS}/${CHUNKS}_${IDX}.csv &
     done

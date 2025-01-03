@@ -292,7 +292,7 @@ def video_collate_fn(examples, processor, max_frames, use_temporal_tokens=True):
     processed_batches = []
     
     # Process each example individually
-    for example in examples:
+    for example_idx, example in enumerate(examples):
         frames = example['frames']
         timestamps = example.get('timestamps', [None] * len(frames))  # Get timestamps if available
         question = example['question']
@@ -460,7 +460,21 @@ def video_collate_fn(examples, processor, max_frames, use_temporal_tokens=True):
                 )
         
         combined_batch["pixel_values"] = torch.cat(pixel_values, dim=0)
+
+    print("\n=== Actual Context Length Usage ===")
+    batch_size, seq_length = combined_batch["input_ids"].shape
+    max_pos_embeddings = processor.tokenizer.model_max_length
     
+    print(f"Sequence length used: {seq_length}")
+    print(f"Model max length: {max_pos_embeddings}")
+    print(f"Context utilization: {(seq_length / max_pos_embeddings) * 100:.2f}%")
+    
+    # Look at attention masks to see real token count per sequence
+    actual_tokens = combined_batch["attention_mask"].sum(dim=1)
+    print(f"Non-padded lengths per sequence: {actual_tokens.tolist()}")
+    print(f"Max actual length: {actual_tokens.max().item()}")
+    
+
     return combined_batch
 
 
@@ -550,7 +564,7 @@ def main():
     # Generate output directory
     temporal_str = "with_temp" if args.temporal_tokens else "no_temp"
     # output_dir = f"./smolvlm_frames{args.max_frames}_{temporal_str}_lr_1e-5"
-    output_dir = f"./smolvlm_longvucauldron_FPS_fps{int(args.fps)}_frames{args.max_frames}_{temporal_str}_lr_5e-7"
+    output_dir = f"./smolvlm_longvucauldron_FPS_fps{int(args.fps)}_frames{args.max_frames}_{temporal_str}_lr_5e-7_troubleshoot"
     
     # Print configuration if main process
     if is_main_process_multi_node():
